@@ -351,17 +351,49 @@ def _handle_sprite_import(sprite_mgr, panel, bg_manager, name, source_folder):
     return ok
 
 
-def main():
-    args = parse_args()
-    cfg = load()
+class RuntimeResources:
+    """Own runtime resources so every initialized stage is released exactly once."""
+
+    def __init__(self):
+        self.pygame_initialized = False
+        self.audio = None
+        self.background = None
+        self.network = None
+        self.closed = False
+
+    @staticmethod
+    def _ignore_cleanup_error(callback):
+        try:
+            callback()
+        except Exception:
+            logger.exception("Runtime cleanup failed")
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+
+        if self.background is not None:
+            self._ignore_cleanup_error(self.background.cleanup)
+        if self.audio is not None:
+            self._ignore_cleanup_error(self.audio.stop)
+        if self.network is not None:
+            self._ignore_cleanup_error(self.network.shutdown)
+        if self.pygame_initialized:
+            self._ignore_cleanup_error(pygame.quit)
+
+
+def startup_options(cfg, args):
+    """Derive diagnostic startup flags without changing persistent configuration."""
+    fullscreen_start = not args.windowed and cfg["Display"]["fullscreen"] == "true"
+    audio_enabled = not args.no_audio and cfg["Audio"]["enabled"] == "true"
+    return fullscreen_start, audio_enabled
+
+
+def _main(args, cfg, resources):
     run_deadline = (
         time.monotonic() + args.run_seconds if args.run_seconds is not None else None
     )
-
-    if args.windowed:
-        cfg["Display"]["fullscreen"] = "false"
-    if args.no_audio:
-        cfg["Audio"]["enabled"] = "false"
 
     # ── ask how many hosts to expect ──────────────────────────
     default_hosts = cfg["Network"].get("expected_hosts", "2")
@@ -397,10 +429,11 @@ def main():
         except Exception:
             pass
 
+    resources.pygame_initialized = True
     pygame.init()
     cfg_w = int(cfg["Display"]["width"])
     cfg_h = int(cfg["Display"]["height"])
-    fullscreen_start = cfg["Display"]["fullscreen"] == "true"
+    fullscreen_start, audio_enabled = startup_options(cfg, args)
 
     if fullscreen_start:
         flags = pygame.DOUBLEBUF | pygame.FULLSCREEN
@@ -418,11 +451,13 @@ def main():
     panel = ConfigPanel(W, H)
     cross_screen_enabled = True
     audio = AudioManager(volume=float(cfg["Audio"]["volume"]))
-    if cfg["Audio"]["enabled"] == "true":
+    resources.audio = audio
+    if audio_enabled:
         audio.play()
 
     # Background init
     bg_manager = BackgroundManager(W, H)
+    resources.background = bg_manager
     bg_cfg_type = cfg["Background"].get("type", "gradient")
     bg_cfg_path = cfg["Background"].get("path", "")
     if bg_cfg_type == "image" and bg_cfg_path:
@@ -449,6 +484,7 @@ def main():
     # Network init
     start_port = args.port if args.port is not None else int(cfg["Network"]["port"])
     net = NetworkManager(start_port)
+    resources.network = net
     reg = HostRegistry(net.port)
     msg_queue = queue.Queue()
     net.start_listen(msg_queue)
@@ -704,11 +740,20 @@ def main():
 
         pygame.display.flip()
 
-    net.broadcast(msg.pack_goodbye(reg.my_id))
-    bg_manager.cleanup()
-    audio.stop()
-    net.shutdown()
-    pygame.quit()
+    try:
+        net.broadcast(msg.pack_goodbye(reg.my_id))
+    except Exception:
+        logger.exception("Failed to broadcast GOODBYE during normal shutdown")
+
+
+def main():
+    args = parse_args()
+    cfg = load()
+    resources = RuntimeResources()
+    try:
+        _main(args, cfg, resources)
+    finally:
+        resources.close()
 
 
 if __name__ == "__main__":
