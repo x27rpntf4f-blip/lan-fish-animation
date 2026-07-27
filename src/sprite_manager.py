@@ -18,7 +18,10 @@ SpriteManager —— 鱼精灵的加载、缓存、翻转与导入。
 
 import os
 import shutil
+
 import pygame
+
+from fishmesh.sprite_names import resolve_sprite_directory
 
 
 class SpriteManager:
@@ -166,14 +169,10 @@ class SpriteManager:
 
         返回：成功 True / 失败 False（带原因打印）。
         """
+        display_name, dest = resolve_sprite_directory(self.SPRITE_DIR, display_name)
         if not os.path.isdir(source_folder):
             print(f"[SpriteManager] import: not a directory: {source_folder}")
             return False
-        if not display_name.strip():
-            print("[SpriteManager] import: empty display name")
-            return False
-
-        dest = os.path.join(self.SPRITE_DIR, display_name.strip())
         os.makedirs(dest, exist_ok=True)
 
         png_files = sorted(

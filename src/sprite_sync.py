@@ -15,7 +15,23 @@ SpriteSyncManager —— 网络精灵分片接收与重组。
 """
 
 import os
-import struct
+from typing import TypedDict
+
+from fishmesh.sprite_names import resolve_sprite_directory, validate_sprite_name
+
+
+class PendingEntry(TypedDict):
+    total: int
+    received: int
+    chunks: dict[int, bytes]
+
+
+class SpriteChunkInfo(TypedDict):
+    name: str
+    frame_index: int
+    total_chunks: int
+    chunk_index: int
+    data: bytes
 
 
 class SpriteSyncManager:
@@ -46,11 +62,11 @@ class SpriteSyncManager:
         """
         self._sprites_dir = sprites_dir
         # 未完成帧表：key 是 (sprite_name, frame_index) 元组，value 见类注释。
-        self._pending = {}
+        self._pending: dict[tuple[str, int], PendingEntry] = {}
 
     # ── feed a chunk ──────────────────────────────────────────
 
-    def feed_chunk(self, info):
+    def feed_chunk(self, info: SpriteChunkInfo) -> bool:
         """
         处理一个 SPRITE_CHUNK 消息字典（由 message.unpack_sprite_chunk 解出）。
 
@@ -63,18 +79,19 @@ class SpriteSyncManager:
         2) 写入当前 chunk（重复则覆盖，幂等）
         3) 位掩码比较判定完整；完整则按 idx 排序拼接、写盘、清理 entry
         """
-        key = (info["name"], info["frame_index"])
+        name = validate_sprite_name(info["name"])
+        key = (name, info["frame_index"])
         entry = self._pending.get(key)
 
         # ── 新建 entry（必要时淘汰最早一条）──
         if entry is None:
             if len(self._pending) >= self.MAX_PENDING:
                 self._drop_oldest()
-            entry = {
-                "total": info["total_chunks"],
-                "received": 0,        # 32-bit 位掩码，每位对应一个 chunk idx
-                "chunks": {},
-            }
+            entry = PendingEntry(
+                total=info["total_chunks"],
+                received=0,        # 32-bit 位掩码，每位对应一个 chunk idx
+                chunks={},
+            )
             self._pending[key] = entry
 
         # ── 写入 chunk（重复时用新数据覆盖，等价于幂等）──
@@ -103,7 +120,7 @@ class SpriteSyncManager:
                 return False
 
         data = b"".join(ordered)
-        self._save_frame(info["name"], info["frame_index"], data)
+        self._save_frame(name, info["frame_index"], data)
         del self._pending[key]
         return True
 
@@ -114,7 +131,7 @@ class SpriteSyncManager:
 
         注意：frame_index 是 0 基，但文件名是 1 基（Fish-1.png），故 +1。
         """
-        dest_dir = os.path.join(self._sprites_dir, name)
+        name, dest_dir = resolve_sprite_directory(self._sprites_dir, name)
         os.makedirs(dest_dir, exist_ok=True)
         # frame_index + 1：约定 0 基 → 1 基文件名
         filename = f"Fish-{frame_index + 1}.png"

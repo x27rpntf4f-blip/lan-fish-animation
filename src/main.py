@@ -19,6 +19,7 @@ from config import load, save
 from fish_entity import Fish
 from fishmesh.errors import PacketDecodeError
 from fishmesh.request_tracker import RequestTracker
+from fishmesh.sprite_names import InvalidSpriteName, resolve_sprite_directory, validate_sprite_name
 from network import HostRegistry, NetworkManager
 from renderer import draw_all_fish, draw_background, draw_hud, safe_font
 from sprite_manager import SpriteManager
@@ -117,16 +118,14 @@ def _send_sprite_data_async(sprite_mgr, net, target_ip, target_port,
                             sender_id, sprite_name):
     """Send all PNG frames in a background thread so the main loop
     is not blocked by large UDP transfers."""
-    import copy
     # snapshot the net ref & data so the thread doesn't touch runtime state
     _net = net
     _ip = target_ip
     _port = target_port
     _sid = sender_id
-    _name = sprite_name
+    _name, folder = resolve_sprite_directory(sprite_mgr.SPRITE_DIR, sprite_name)
     # Read raw PNG bytes from disk — sprite_mgr.frames stores
     # Surfaces which cannot be sliced for network chunks.
-    folder = os.path.join(sprite_mgr.SPRITE_DIR, sprite_name)
     frames = []
     if os.path.isdir(folder):
         for fname in sorted(os.listdir(folder)):
@@ -157,7 +156,11 @@ def _request_missing_sprites(remote_types, sender_ip, sender_port, net, reg,
                              sprite_mgr, request_tracker):
     my_types = set(sprite_mgr.get_types())
     for remote_type in remote_types:
-        if (remote_type and remote_type not in my_types and
+        try:
+            remote_type = validate_sprite_name(remote_type)
+        except InvalidSpriteName:
+            continue
+        if (remote_type not in my_types and
                 request_tracker.should_request(remote_type)):
             request_tracker.mark_requested(remote_type)
             req = msg.pack_sprite_request(reg.my_id, remote_type)
@@ -309,12 +312,19 @@ def handle_network_message(data, addr, net, reg, fishes, screen_w, screen_h,
     elif mtype == msg.MSG_SPRITE_REQ:
         name = decoded
         if name and name in sprite_mgr.get_types():
-            _send_sprite_data_async(sprite_mgr, net, sender_ip, addr[1],
-                              reg.my_id, name)
+            try:
+                _send_sprite_data_async(sprite_mgr, net, sender_ip, addr[1],
+                                        reg.my_id, name)
+            except InvalidSpriteName as exc:
+                logger.warning("Discarding unsafe sprite request %r: %s", name, exc)
 
     elif mtype == msg.MSG_SPRITE_CHUNK:
         info = decoded
-        complete = sync_mgr.feed_chunk(info)
+        try:
+            complete = sync_mgr.feed_chunk(info)
+        except InvalidSpriteName as exc:
+            logger.warning("Discarding unsafe sprite chunk %r: %s", info["name"], exc)
+            return
         if complete:
             # New sprite frame stored — rescan and update fish types
             sprite_mgr._scan_sprites_dir()
