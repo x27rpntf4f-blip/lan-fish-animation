@@ -1,4 +1,3 @@
-import argparse
 import ctypes
 import logging
 import math
@@ -16,6 +15,7 @@ import message as msg
 from audio_manager import AudioManager
 from background_manager import BackgroundManager
 from config import load, save
+from fish_demo.cli import parse_args
 from fish_entity import Fish
 from fishmesh.errors import PacketDecodeError
 from fishmesh.request_tracker import RequestTracker
@@ -77,12 +77,6 @@ def _try_transfer(fish, neighbor_key, reg, net, W, H):
     net.send(target.reachable_ip, target.port, data)
     net.send(target.reachable_ip, target.port, data)
     return True
-
-
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--port", type=int, default=0, help="UDP port (0=use config)")
-    return p.parse_args()
 
 
 def spawn_fish(host_id, count):
@@ -360,21 +354,32 @@ def _handle_sprite_import(sprite_mgr, panel, bg_manager, name, source_folder):
 def main():
     args = parse_args()
     cfg = load()
+    run_deadline = (
+        time.monotonic() + args.run_seconds if args.run_seconds is not None else None
+    )
+
+    if args.windowed:
+        cfg["Display"]["fullscreen"] = "false"
+    if args.no_audio:
+        cfg["Audio"]["enabled"] = "false"
 
     # ── ask how many hosts to expect ──────────────────────────
     default_hosts = cfg["Network"].get("expected_hosts", "2")
-    try:
-        prompt = f"Number of computers in mesh (2-10) [{default_hosts}]: "
-        answer = input(prompt).strip()
-        if answer:
-            expected = int(answer)
-            expected = max(2, min(10, expected))
-        else:
+    if args.expected_hosts is None:
+        try:
+            prompt = f"Number of computers in mesh (2-10) [{default_hosts}]: "
+            answer = input(prompt).strip()
+            if answer:
+                expected = int(answer)
+                expected = max(2, min(10, expected))
+            else:
+                expected = int(default_hosts)
+        except (ValueError, EOFError):
             expected = int(default_hosts)
-    except (ValueError, EOFError):
-        expected = int(default_hosts)
-    cfg["Network"]["expected_hosts"] = str(expected)
-    save(cfg)
+        cfg["Network"]["expected_hosts"] = str(expected)
+        save(cfg)
+    else:
+        expected = args.expected_hosts
     print(f"Mesh target: {expected} hosts  (broadcast until {expected} peers found)")
     # ── end host-count prompt ─────────────────────────────────
 
@@ -442,7 +447,7 @@ def main():
     )
 
     # Network init
-    start_port = args.port if args.port else int(cfg["Network"]["port"])
+    start_port = args.port if args.port is not None else int(cfg["Network"]["port"])
     net = NetworkManager(start_port)
     reg = HostRegistry(net.port)
     msg_queue = queue.Queue()
@@ -451,8 +456,10 @@ def main():
     # ---- discovery handshake ----
     hello = msg.pack_hello(0, reg.my_hostname, reg.my_ip, net.port)
     net.broadcast(hello)
-    end = time.time() + 4.0
-    while time.time() < end:
+    discovery_deadline = time.monotonic() + 4.0
+    while time.monotonic() < discovery_deadline:
+        if run_deadline is not None and time.monotonic() >= run_deadline:
+            break
         try:
             data, addr = msg_queue.get_nowait()
             if addr[0] == reg.my_ip and addr[1] == net.port:
@@ -478,6 +485,10 @@ def main():
     last_discovery_hello = 0   # periodic discovery broadcast
 
     while running:
+        if run_deadline is not None and time.monotonic() >= run_deadline:
+            running = False
+            continue
+
         # 60 fps aligns tick() with the 60 Hz display vsync — flip()
         # naturally paces frames at ~16.67 ms so tick() rarely needs
         # to sleep.  This sidesteps the SDL_Delay precision issue.
