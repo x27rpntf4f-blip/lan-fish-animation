@@ -27,6 +27,19 @@ fishmesh-demo = "fish_demo.app:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+py-modules = [
+    "audio_manager",
+    "background_manager",
+    "config",
+    "fish_entity",
+    "main",
+    "message",
+    "network",
+    "renderer",
+    "sprite_manager",
+    "sprite_sync",
+    "ui",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
