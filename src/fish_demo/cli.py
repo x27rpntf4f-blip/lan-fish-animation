@@ -14,9 +14,7 @@ def _bounded_int(name: str, minimum: int, maximum: int):
         except ValueError as exc:
             raise argparse.ArgumentTypeError(f"{name} must be an integer") from exc
         if not minimum <= parsed <= maximum:
-            raise argparse.ArgumentTypeError(
-                f"{name} must be between {minimum} and {maximum}"
-            )
+            raise argparse.ArgumentTypeError(f"{name} must be between {minimum} and {maximum}")
         return parsed
 
     return parse
@@ -62,5 +60,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--no-audio",
         action="store_true",
         help="disable audio without persisting the audio override",
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        default="INFO",
+        help="minimum runtime log level (default: INFO)",
     )
     return parser.parse_args(argv)

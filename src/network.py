@@ -1,13 +1,9 @@
+import logging
 import socket
 import threading
 import time
 
-from message import (
-    HEADER_SIZE, MSG_HELLO, MSG_ACK, MSG_HEARTBEAT, MSG_TOPOLOGY,
-    MSG_TRANSFER, MSG_GOODBYE, MSG_NAMES,
-    pack_hello, pack_ack, pack_heartbeat, pack_topology, pack_goodbye,
-    unpack_header, unpack_hello, unpack_ack, unpack_topology
-)
+logger = logging.getLogger(__name__)
 
 
 class HostInfo:
@@ -33,14 +29,14 @@ class HostInfo:
 
 class HostRegistry:
     def __init__(self, port):
-        self.hosts = {}          # "ip:port" → HostInfo
+        self.hosts = {}  # "ip:port" → HostInfo
         self.my_hostname = socket.gethostname()
         self.my_ip = self._get_my_ip()
         self.my_port = port
         self.my_key = HostInfo.make_key(self.my_ip, port)
         self.my_id = 0
-        self.left = None         # key of left neighbor
-        self.right = None        # key of right neighbor
+        self.left = None  # key of left neighbor
+        self.right = None  # key of right neighbor
 
     @staticmethod
     def _get_my_ip():
@@ -53,8 +49,11 @@ class HostRegistry:
             s.close()
             if ip and not ip.startswith("127."):
                 return ip
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "Default-route IP probe failed",
+                extra={"event": "local_ip_probe_failed", "error": str(exc)},
+            )
 
         # Strategy 2: old method (may pick wrong interface on multi-homed machines
         # with virtual adapters, but works as a fallback)
@@ -62,7 +61,11 @@ class HostRegistry:
         try:
             s.connect(("10.255.255.255", 1))
             ip = s.getsockname()[0]
-        except Exception:
+        except Exception as exc:
+            logger.debug(
+                "Fallback IP probe failed",
+                extra={"event": "local_ip_fallback_failed", "error": str(exc)},
+            )
             ip = "127.0.0.1"
         finally:
             s.close()
@@ -142,8 +145,7 @@ class HostRegistry:
 
     def check_timeout(self, timeout=10):
         now = time.time()
-        gone = [key for key, h in self.hosts.items()
-                if now - h.last_heartbeat > timeout]
+        gone = [key for key, h in self.hosts.items() if now - h.last_heartbeat > timeout]
         return gone
 
     def rebuild_topology(self):
@@ -176,8 +178,12 @@ class HostRegistry:
         return len(self.hosts) + 1
 
     def my_topology_entry(self):
-        return {"host_id": self.my_id, "position": self.my_id,
-                "ip": self.my_ip, "port": self.my_port}
+        return {
+            "host_id": self.my_id,
+            "position": self.my_id,
+            "ip": self.my_ip,
+            "port": self.my_port,
+        }
 
 
 class NetworkManager:
@@ -186,8 +192,11 @@ class NetworkManager:
         if hasattr(socket, "SO_REUSEPORT"):
             try:
                 self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.debug(
+                    "SO_REUSEPORT is unavailable",
+                    extra={"event": "socket_option_unavailable", "error": str(exc)},
+                )
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
@@ -197,15 +206,23 @@ class NetworkManager:
         self.broadcast_base = 6000
         self.running = False
         self.thread = None
-        self._hb_data = None         # heartbeat payload set by main thread
-        self._hb_registry = None     # registry snapshot for heartbeat
+        self._hb_data = None  # heartbeat payload set by main thread
+        self._hb_registry = None  # registry snapshot for heartbeat
 
     def _bind(self, port):
         for off in range(10):
             try:
                 self.sock.bind(("0.0.0.0", port + off))
                 return port + off
-            except OSError:
+            except OSError as exc:
+                logger.debug(
+                    "UDP port is unavailable",
+                    extra={
+                        "event": "socket_bind_failed",
+                        "peer": f"0.0.0.0:{port + off}",
+                        "error": str(exc),
+                    },
+                )
                 continue
         raise RuntimeError(f"Cannot bind to any port {port}-{port + 9}")
 
@@ -226,10 +243,13 @@ class NetworkManager:
             try:
                 data, addr = self.sock.recvfrom(4096)
                 queue.put((data, addr))
-            except socket.timeout:
+            except TimeoutError:
                 pass
-            except Exception as e:
-                print(f"[NET-ERR] listener: {e}")
+            except Exception as exc:
+                logger.warning(
+                    "UDP listener failed",
+                    extra={"event": "packet_receive_failed", "error": str(exc)},
+                )
 
             # Send any pending heartbeat from the network thread so
             # sendto() latency never blocks the main render loop.
@@ -244,9 +264,9 @@ class NetworkManager:
                 self._hb_data = None
                 self._hb_registry = None
                 if reg is not None:
-                    self.send_known(data, reg)   # heartbeat: unicast
+                    self.send_known(data, reg)  # heartbeat: unicast
                 else:
-                    self.broadcast(data)          # discovery: broadcast
+                    self.broadcast(data)  # discovery: broadcast
 
     def broadcast(self, data):
         """Send a single broadcast to the well-known port.  One hop is
@@ -254,14 +274,28 @@ class NetworkManager:
         port, and within a single machine we reach peers via unicast."""
         try:
             self.sock.sendto(data, ("255.255.255.255", self.broadcast_base))
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.warning(
+                "UDP broadcast failed",
+                extra={
+                    "event": "packet_broadcast_failed",
+                    "peer": f"255.255.255.255:{self.broadcast_base}",
+                    "error": str(exc),
+                },
+            )
 
     def send(self, ip, port, data):
         try:
             self.sock.sendto(data, (ip, port))
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.warning(
+                "UDP send failed",
+                extra={
+                    "event": "packet_send_failed",
+                    "peer": f"{ip}:{port}",
+                    "error": str(exc),
+                },
+            )
 
     def send_known(self, data, registry):
         """Unicast *data* to every host currently in the registry.
@@ -276,5 +310,8 @@ class NetworkManager:
             self.thread.join(timeout=1)
         try:
             self.sock.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "UDP socket close failed",
+                extra={"event": "socket_close_failed", "error": str(exc)},
+            )

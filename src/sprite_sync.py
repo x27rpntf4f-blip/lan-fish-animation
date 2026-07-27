@@ -14,6 +14,7 @@ SpriteSyncManager —— 网络精灵分片接收与重组。
 - 落盘后 main 调 sprite_mgr._scan_sprites_dir()，本地即可使用新 type。
 """
 
+import logging
 from typing import TypedDict
 
 from fishmesh.sprite_names import (
@@ -21,6 +22,8 @@ from fishmesh.sprite_names import (
     resolve_sprite_directory,
     validate_sprite_name,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class PendingEntry(TypedDict):
@@ -93,7 +96,7 @@ class SpriteSyncManager:
                 self._drop_oldest()
             entry = PendingEntry(
                 total=info["total_chunks"],
-                received=0,        # 32-bit 位掩码，每位对应一个 chunk idx
+                received=0,  # 32-bit 位掩码，每位对应一个 chunk idx
                 chunks={},
             )
             self._pending[key] = entry
@@ -103,7 +106,7 @@ class SpriteSyncManager:
         if ci not in entry["chunks"]:
             entry["chunks"][ci] = info["data"]
             # 把第 ci 位置 1；用 OR 避免重复设置产生副作用
-            entry["received"] |= (1 << ci)
+            entry["received"] |= 1 << ci
 
         # ── 完整性判定：前 total 位是否全部 1 ──
         if entry["total"] == 0:
@@ -141,7 +144,14 @@ class SpriteSyncManager:
         filename = f"Fish-{frame_index + 1}.png"
         name = validate_sprite_name(name)
         atomic_write_sprite_bytes(self._sprites_dir, name, filename, data)
-        print(f"[SpriteSync] saved {filename} to {name}/")
+        logger.info(
+            "Saved completed sprite frame",
+            extra={
+                "event": "sprite_frame_saved",
+                "sprite_name": name,
+                "frame_index": frame_index,
+            },
+        )
 
     def _drop_oldest(self):
         """

@@ -17,12 +17,15 @@ SpriteManager —— 鱼精灵的加载、缓存、翻转与导入。
 """
 
 import io
+import logging
 import os
 import shutil
 
 import pygame
 
 from fishmesh.sprite_names import atomic_replace_sprite_file, resolve_sprite_directory
+
+logger = logging.getLogger(__name__)
 
 
 class SpriteManager:
@@ -39,11 +42,9 @@ class SpriteManager:
 
     # 标准精灵目录（项目根/assets/fish_sprites）。
     # 使用 os.path.dirname(__file__) 的上一级定位项目根，保证从任意 cwd 调用都能找对路径。
-    SPRITE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                              "assets", "fish_sprites")
+    SPRITE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "fish_sprites")
     # 老版本 Free Fish Icons 平铺目录：仅用于一次性迁移。
-    OLD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                           "assets", "Free Fish Icons")
+    OLD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "Free Fish Icons")
 
     def __init__(self):
         # type 字符串 -> 该 type 的所有帧 Surface 列表（顺序与文件名一致）
@@ -88,16 +89,18 @@ class SpriteManager:
             stem = fname[4:]
             if "-" not in stem:
                 continue
-            type_letter = stem[0]              # "A"
+            type_letter = stem[0]  # "A"
             frame_num = stem[2:].split(".")[0]  # "1"
             # 一个 type 一个目录，与新格式对齐
             type_dir = os.path.join(self.SPRITE_DIR, f"Fish {type_letter}")
             os.makedirs(type_dir, exist_ok=True)
             new_name = f"Fish-{frame_num}.png"
-            shutil.copy2(os.path.join(self.OLD_DIR, fname),
-                         os.path.join(type_dir, new_name))
+            shutil.copy2(os.path.join(self.OLD_DIR, fname), os.path.join(type_dir, new_name))
 
-        print(f"[SpriteManager] migrated old sprites → {self.SPRITE_DIR}")
+        logger.info(
+            "Migrated legacy sprite assets",
+            extra={"event": "sprite_migration_completed", "path": self.SPRITE_DIR},
+        )
 
     def _scan_sprites_dir(self):
         """
@@ -126,7 +129,8 @@ class SpriteManager:
 
             # 仅接受 Fish-N.png 命名规范的 PNG，过滤 README 等杂项
             png_files = sorted(
-                f for f in os.listdir(folder_path)
+                f
+                for f in os.listdir(folder_path)
                 if f.lower().startswith("fish-") and f.lower().endswith(".png")
             )
             if not png_files:
@@ -134,13 +138,22 @@ class SpriteManager:
 
             # 逐帧加载；任一帧失败用 64×64 粉红色方块占位，保证后续索引安全
             frames = []
-            for fname in png_files:
+            for frame_index, fname in enumerate(png_files):
                 fpath = os.path.join(folder_path, fname)
                 try:
                     img = pygame.image.load(fpath).convert_alpha()
                     frames.append(img)
-                except pygame.error as e:
-                    print(f"[SpriteManager] failed to load {fpath}: {e}")
+                except pygame.error as exc:
+                    logger.warning(
+                        "Using fallback for unreadable sprite frame",
+                        extra={
+                            "event": "sprite_frame_load_failed",
+                            "sprite_name": folder,
+                            "frame_index": frame_index,
+                            "path": fpath,
+                            "error": str(exc),
+                        },
+                    )
                     fallback = pygame.Surface((64, 64), pygame.SRCALPHA)
                     fallback.fill((255, 100, 100))
                     frames.append(fallback)
@@ -154,7 +167,14 @@ class SpriteManager:
             self.flipped_frames[folder] = flipped
 
         loaded = len(self.fish_types)
-        print(f"[SpriteManager] loaded {loaded} fish types from {self.SPRITE_DIR}")
+        logger.info(
+            "Loaded sprite types",
+            extra={
+                "event": "sprite_catalog_loaded",
+                "sprite_count": loaded,
+                "path": self.SPRITE_DIR,
+            },
+        )
 
     def import_sprites(self, source_folder, display_name):
         """
@@ -172,24 +192,44 @@ class SpriteManager:
         """
         display_name, dest = resolve_sprite_directory(self.SPRITE_DIR, display_name)
         if not os.path.isdir(source_folder):
-            print(f"[SpriteManager] import: not a directory: {source_folder}")
+            logger.warning(
+                "Rejected sprite import source",
+                extra={
+                    "event": "sprite_import_rejected",
+                    "sprite_name": display_name,
+                    "path": source_folder,
+                    "error": "source is not a directory",
+                },
+            )
             return False
         os.makedirs(dest, exist_ok=True)
 
-        png_files = sorted(
-            f for f in os.listdir(source_folder)
-            if f.lower().endswith(".png")
-        )
+        png_files = sorted(f for f in os.listdir(source_folder) if f.lower().endswith(".png"))
         if not png_files:
-            print(f"[SpriteManager] import: no PNG files in {source_folder}")
+            logger.warning(
+                "Rejected empty sprite import",
+                extra={
+                    "event": "sprite_import_rejected",
+                    "sprite_name": display_name,
+                    "path": source_folder,
+                    "error": "source contains no PNG files",
+                },
+            )
             return False
 
         for i, fname in enumerate(png_files, start=1):
             src = os.path.join(source_folder, fname)
             new_name = f"Fish-{i}.png"
+
             # 读取 → 缩放 → 居中到透明画布 → 落盘。
             # 保留 alpha 通道（convert_alpha），避免黑底。
-            def _write_frame(temporary_stream, source=src, source_name=fname):
+            def _write_frame(
+                temporary_stream,
+                source=src,
+                source_name=fname,
+                import_index=i - 1,
+                sprite_name=display_name,
+            ):
                 try:
                     img = pygame.image.load(source).convert_alpha()
                     w, h = img.get_width(), img.get_height()
@@ -208,14 +248,30 @@ class SpriteManager:
                     encoded = io.BytesIO()
                     pygame.image.save(canvas, encoded, ".png")
                     temporary_stream.write(encoded.getvalue())
-                except pygame.error as e:
-                    print(f"[SpriteManager] import: failed to process {source_name}: {e}")
+                except pygame.error as exc:
+                    logger.warning(
+                        "Copied sprite frame without normalization",
+                        extra={
+                            "event": "sprite_frame_import_failed",
+                            "sprite_name": sprite_name,
+                            "frame_index": import_index,
+                            "path": source,
+                            "error": str(exc),
+                        },
+                    )
                     with open(source, "rb") as source_stream:
                         shutil.copyfileobj(source_stream, temporary_stream)
 
             atomic_replace_sprite_file(self.SPRITE_DIR, display_name, new_name, _write_frame)
 
-        print(f"[SpriteManager] imported '{display_name}' with {len(png_files)} frame(s)")
+        logger.info(
+            "Imported sprite type",
+            extra={
+                "event": "sprite_import_completed",
+                "sprite_name": display_name,
+                "frame_count": len(png_files),
+            },
+        )
         # 触发完整 rescan：flipped_frames 等缓存一并刷新
         self._scan_sprites_dir()
         return True

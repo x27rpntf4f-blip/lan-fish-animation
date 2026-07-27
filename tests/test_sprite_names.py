@@ -601,7 +601,7 @@ def test_network_handler_marks_canonical_sprite_name_complete(tmp_path: Path) ->
     assert tracker.should_request("Purple")
 
 
-def test_ui_import_callback_turns_invalid_name_into_failed_import(capsys) -> None:
+def test_ui_import_callback_turns_invalid_name_into_failed_import(caplog) -> None:
     class SpriteManagerDouble:
         def import_sprites(self, _source: str, _name: str) -> bool:
             raise InvalidSpriteName("unsafe")
@@ -618,4 +618,7 @@ def test_ui_import_callback_turns_invalid_name_into_failed_import(capsys) -> Non
     assert main._handle_sprite_import(
         SpriteManagerDouble(), PanelDouble(), background, "CON", "/tmp/source"
     ) is False
-    assert "invalid sprite name" in capsys.readouterr().out.lower()
+    record = caplog.records[-1]
+    assert record.event == "sprite_import_rejected"
+    assert record.sprite_name == "CON"
+    assert record.error == "unsafe"
