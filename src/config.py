@@ -1,4 +1,6 @@
 import configparser
+import os
+import tempfile
 from pathlib import Path
 
 DEFAULTS = {
@@ -15,7 +17,7 @@ DEFAULTS = {
 }
 
 def _default_path() -> Path:
-    """Return the user-writable configuration path for the current invocation."""
+    """Return the default configuration path relative to the active working directory."""
     return Path.cwd() / "config.ini"
 
 
@@ -31,8 +33,29 @@ def load(path: Path | None = None) -> configparser.ConfigParser:
 
 
 def save(cfg: configparser.ConfigParser, path: Path | None = None) -> None:
-    """Persist configuration as UTF-8 without assuming an install location is writable."""
+    """Atomically persist configuration as UTF-8 at an explicit or default path."""
     config_path = Path(path) if path is not None else _default_path()
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    with config_path.open("w", encoding="utf-8") as f:
-        cfg.write(f)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        dir=config_path.parent,
+        prefix=f".{config_path.name}.",
+        suffix=".tmp",
+    )
+    temporary_path = Path(temporary_name)
+
+    try:
+        temporary_file = os.fdopen(file_descriptor, "w", encoding="utf-8")
+        file_descriptor = -1
+        with temporary_file:
+            cfg.write(temporary_file)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, config_path)
+    except BaseException:
+        if file_descriptor != -1:
+            os.close(file_descriptor)
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
