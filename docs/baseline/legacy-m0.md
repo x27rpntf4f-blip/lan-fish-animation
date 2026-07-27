@@ -44,3 +44,51 @@ SPRITE_CHUNK round trips.
 | Host identities | Rebuilding topology reassigns each host's `host_id` according to sorted peers, so host IDs are mutable. | `src/network.py:149-156` | Preserve compatibility in M1; define stable identity semantics in the later protocol migration. |
 | Network sends on the render thread | Incoming message handling is called by the main loop and directly calls `net.send`/`net.broadcast`; transfers also send directly. | `src/main.py:58-69`, `src/main.py:512-521`, `src/main.py:166-181` | Move sprite and control sends behind a worker/queue without changing visible behavior. |
 | Tracked personal path | The tracked background config contains a machine-specific Windows OneDrive path: `C:/Users/Athur/OneDrive/ͼƬ/OIP-C.png`. | `config.ini:20-22`; capture field `tracked_personal_paths` | Replace it with portable example configuration during M1. |
+
+## M1 Result
+
+Measured on 2026-07-27 with Python 3.12.13 (Clang 17.0.0), uv 0.11.28,
+and macOS 26.5.2 build 25F84 on arm64. The complete command
+`uv run pytest --cov=src --cov-report=term-missing` collected and passed 144
+tests. Coverage was 55% (2,396 statements, 1,085 missed). This is the measured
+whole-`src` value: pygame-heavy and legacy presentation modules remain in the
+denominator, and M1 does not define or enforce a coverage threshold.
+
+### Interpreter and platform support
+
+| Platform | Python | Verification status |
+| --- | --- | --- |
+| macOS 26.5.2 arm64 | 3.12.13 | Locally verified: dependency sync, Ruff, ty, 144 tests with coverage, both headless entry points, compileall, and diff checks. |
+| Ubuntu latest | 3.11, 3.12, 3.13 | Declared in GitHub Actions; pending a successful remote CI run. |
+| macOS latest | 3.11, 3.12, 3.13 | Declared in GitHub Actions; matrix combinations pending a successful remote CI run. |
+| Windows latest | 3.11, 3.12, 3.13 | Declared in GitHub Actions; pending a successful remote CI run, including the complete suite and an explicit native Windows sprite-safety test pass. |
+
+### Resolved defects
+
+- Malformed, truncated, and unknown V1 datagrams now fail closed and are logged
+  without terminating the application loop.
+- Missing sprite requests can be retried after a deadline until at least one
+  complete frame is stored.
+- Sprite names, reads, imports, temporary writes, and atomic replacement are
+  constrained to verified resource directories, including a Windows-native
+  directory guard path.
+- The tracked configuration is portable UTF-8 data without a personal absolute
+  path; diagnostic CLI overrides do not persist.
+- Both `python src/main.py` and `python -m fish_demo` support deterministic
+  headless startup and clean shutdown. Runtime boundaries now emit structured,
+  rate-limited log events.
+- Heartbeats and sprite payload transfer no longer perform their bulk sends on
+  the render thread.
+
+### Remaining limitations
+
+- V1 has no authentication, encryption, ACK/deduplication, or complete
+  multi-frame manifest. M1 cannot detect a missing later frame after a sprite
+  type becomes locally visible.
+- Host IDs remain topology-order dependent, discovery is single-subnet IPv4
+  broadcast, and the topology is one-dimensional.
+- Fish transfer control packets still call the UDP send path from the render
+  loop; only heartbeat and sprite payload work has been moved off that path.
+- The 3 x 3 CI matrix is a declaration until GitHub Actions reports successful
+  jobs. This local run does not claim native Windows/Linux or a real three-host
+  LAN verification.
