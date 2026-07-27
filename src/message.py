@@ -31,6 +31,15 @@ HEADER_FMT = "!BBIH"  # type, sender_id, timestamp_ms, payload_len
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
 
 
+def _encode_text(value: str, max_bytes: int = 255) -> bytes:
+    truncated = value.encode("utf-8")[:max_bytes]
+    try:
+        truncated.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        return truncated[:exc.start]
+    return truncated
+
+
 def _decode_text(raw: bytes, message_name: str, field: str) -> str:
     try:
         return raw.decode("utf-8")
@@ -127,7 +136,7 @@ def pack_heartbeat(sender_id, ip_str=None, port=None, sprite_types=None):
         payload = bytearray()
         payload.append(len(sprite_types) & 0xFF)
         for name in sprite_types:
-            nb = name.encode("utf-8")[:255]
+            nb = _encode_text(name)
             payload.append(len(nb) & 0xFF)
             payload.extend(nb)
     else:
@@ -201,7 +210,7 @@ TRANSFER_PREFIX_SIZE = struct.calcsize(TRANSFER_PREFIX_FMT)
 
 
 def pack_transfer(sender_id, fish, source_screen_w=0):
-    name_bytes = fish.fish_type.encode("utf-8")[:255]
+    name_bytes = _encode_text(fish.fish_type)
     src_hi = (source_screen_w >> 8) & 0xFF
     src_lo = source_screen_w & 0xFF
     heading_byte = 1 if math.cos(fish.direction) >= 0 else 0
@@ -273,7 +282,7 @@ def pack_sprite_ping(sender_id, sprite_types):
     payload = bytearray()
     payload.append(len(sprite_types) & 0xFF)
     for name in sprite_types:
-        nb = name.encode("utf-8")[:255]
+        nb = _encode_text(name)
         payload.append(len(nb) & 0xFF)
         payload.extend(nb)
     return pack_full(MSG_SPRITE_PING, sender_id, bytes(payload))
@@ -305,7 +314,7 @@ def unpack_sprite_ping(payload):
 # ── SPRITE REQUEST ──
 
 def pack_sprite_request(sender_id, sprite_name):
-    nb = sprite_name.encode("utf-8")[:255]
+    nb = _encode_text(sprite_name)
     payload = struct.pack("!B", len(nb)) + nb
     return pack_full(MSG_SPRITE_REQ, sender_id, payload)
 
@@ -329,7 +338,7 @@ def unpack_sprite_request(payload):
 
 def pack_sprite_chunk(sender_id, sprite_name, frame_index, total_chunks,
                       chunk_index, data):
-    nb = sprite_name.encode("utf-8")[:255]
+    nb = _encode_text(sprite_name)
     header = struct.pack("!BBBBH",
                          len(nb),
                          frame_index,

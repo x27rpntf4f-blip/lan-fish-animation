@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import struct
+from collections.abc import Callable
 
 import pytest
 
@@ -79,6 +80,72 @@ def test_type_decoders_preserve_valid_unicode_names() -> None:
     assert message.unpack_sprite_ping(bytes([1, len(encoded)]) + encoded) == [name]
     assert message.unpack_sprite_request(bytes([len(encoded)]) + encoded) == name
     assert message.unpack_sprite_chunk(sprite_chunk_payload(encoded))["name"] == name
+
+
+LONG_MULTIBYTE_NAME = "a" * 254 + "锦"
+TRUNCATED_NAME = "a" * 254
+
+
+class NamedFish:
+    fish_id = 1
+    x = 0.0
+    y = 0.0
+    direction = 0.0
+    speed = 1.0
+    size = 1.0
+    color = (1, 2, 3)
+    fish_type = LONG_MULTIBYTE_NAME
+
+
+def assert_name_was_truncated_safely(
+    packet: bytes,
+    name_length_offset: int,
+    unpack_name: Callable[[bytes], str],
+) -> None:
+    header, payload = message.unpack_full(packet)
+    assert header[3] == len(payload)
+    assert payload[name_length_offset] == len(TRUNCATED_NAME.encode("utf-8")) == 254
+    assert unpack_name(payload) == TRUNCATED_NAME
+
+
+def test_pack_heartbeat_truncates_name_at_utf8_boundary() -> None:
+    assert_name_was_truncated_safely(
+        message.pack_heartbeat(1, sprite_types=[LONG_MULTIBYTE_NAME]),
+        1,
+        lambda payload: message.unpack_heartbeat(payload)["types"][0],
+    )
+
+
+def test_pack_transfer_truncates_name_at_utf8_boundary() -> None:
+    assert_name_was_truncated_safely(
+        message.pack_transfer(1, NamedFish()),
+        message.TRANSFER_PREFIX_SIZE,
+        lambda payload: message.unpack_transfer(payload)["fish_type"],
+    )
+
+
+def test_pack_sprite_ping_truncates_name_at_utf8_boundary() -> None:
+    assert_name_was_truncated_safely(
+        message.pack_sprite_ping(1, [LONG_MULTIBYTE_NAME]),
+        1,
+        lambda payload: message.unpack_sprite_ping(payload)[0],
+    )
+
+
+def test_pack_sprite_request_truncates_name_at_utf8_boundary() -> None:
+    assert_name_was_truncated_safely(
+        message.pack_sprite_request(1, LONG_MULTIBYTE_NAME),
+        0,
+        message.unpack_sprite_request,
+    )
+
+
+def test_pack_sprite_chunk_truncates_name_at_utf8_boundary() -> None:
+    assert_name_was_truncated_safely(
+        message.pack_sprite_chunk(1, LONG_MULTIBYTE_NAME, 0, 1, 0, b"data"),
+        0,
+        lambda payload: message.unpack_sprite_chunk(payload)["name"],
+    )
 
 
 def test_handler_discards_malformed_packet_without_mutating_state(caplog) -> None:
