@@ -11,3 +11,15 @@ def test_readme_contains_required_workflows() -> None:
         "uv run ty check src/fishmesh src/fish_demo",
     ):
         assert command in text
+
+
+def test_ci_pins_and_verifies_each_matrix_python() -> None:
+    text = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    for contract in (
+        "UV_PYTHON: ${{ matrix.python }}",
+        "uv sync --locked --extra dev",
+        "EXPECTED_PYTHON: ${{ matrix.python }}",
+        "platform.python_version()",
+        "actual.startswith(expected + '.')",
+    ):
+        assert contract in text

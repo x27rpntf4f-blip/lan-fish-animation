@@ -21,6 +21,7 @@ jobs:
       SDL_VIDEODRIVER: dummy
       SDL_AUDIODRIVER: dummy
       PYTHONDONTWRITEBYTECODE: "1"
+      UV_PYTHON: ${{ matrix.python }}
 
     steps:
       - name: Check out repository
@@ -33,7 +34,12 @@ jobs:
           enable-cache: true
 
       - name: Install project and development dependencies
-        run: uv sync --extra dev
+        run: uv sync --locked --extra dev
+
+      - name: Verify matrix Python
+        env:
+          EXPECTED_PYTHON: ${{ matrix.python }}
+        run: uv run python -c "import os, platform; expected = os.environ['EXPECTED_PYTHON']; actual = platform.python_version(); print(f'Python {actual} (expected {expected}.x)'); assert actual.startswith(expected + '.'), f'expected {expected}.x, got {actual}'"
 
       - name: Ruff
         run: uv run ruff check src/fishmesh src/fish_demo tests scripts

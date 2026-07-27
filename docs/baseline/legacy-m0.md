@@ -49,7 +49,7 @@ SPRITE_CHUNK round trips.
 
 Measured on 2026-07-27 with Python 3.12.13 (Clang 17.0.0), uv 0.11.28,
 and macOS 26.5.2 build 25F84 on arm64. The complete command
-`uv run pytest --cov=src --cov-report=term-missing` collected and passed 144
+`uv run pytest --cov=src --cov-report=term-missing` collected and passed 145
 tests. Coverage was 55% (2,396 statements, 1,085 missed). This is the measured
 whole-`src` value: pygame-heavy and legacy presentation modules remain in the
 denominator, and M1 does not define or enforce a coverage threshold.
@@ -58,7 +58,7 @@ denominator, and M1 does not define or enforce a coverage threshold.
 
 | Platform | Python | Verification status |
 | --- | --- | --- |
-| macOS 26.5.2 arm64 | 3.12.13 | Locally verified: dependency sync, Ruff, ty, 144 tests with coverage, both headless entry points, compileall, and diff checks. |
+| macOS 26.5.2 arm64 | 3.12.13 | Locally verified: dependency sync, Ruff, ty, 145 tests with coverage, both headless entry points, compileall, and diff checks. |
 | Ubuntu latest | 3.11, 3.12, 3.13 | Declared in GitHub Actions; pending a successful remote CI run. |
 | macOS latest | 3.11, 3.12, 3.13 | Declared in GitHub Actions; matrix combinations pending a successful remote CI run. |
 | Windows latest | 3.11, 3.12, 3.13 | Declared in GitHub Actions; pending a successful remote CI run, including the complete suite and an explicit native Windows sprite-safety test pass. |
