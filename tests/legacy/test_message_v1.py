@@ -27,12 +27,40 @@ def test_v1_header_is_eight_bytes() -> None:
     assert message.HEADER_SIZE == 8
 
 
+def test_v1_message_inventory_has_all_nine_constants() -> None:
+    assert {
+        message.MSG_HELLO,
+        message.MSG_ACK,
+        message.MSG_HEARTBEAT,
+        message.MSG_TOPOLOGY,
+        message.MSG_TRANSFER,
+        message.MSG_GOODBYE,
+        message.MSG_SPRITE_PING,
+        message.MSG_SPRITE_REQ,
+        message.MSG_SPRITE_CHUNK,
+    } == set(message.MSG_NAMES)
+    assert len(message.MSG_NAMES) == 9
+
+
 def test_v1_hello_round_trip() -> None:
     packet = message.pack_hello(2, "node-a", "192.168.1.10", 6000)
     header, payload = message.unpack_full(packet)
     assert header[0] == message.MSG_HELLO
     assert header[1] == 2
     assert message.unpack_hello(payload) == {
+        "hostname": "node-a",
+        "ip": "192.168.1.10",
+        "port": 6000,
+    }
+
+
+def test_v1_ack_uses_legacy_hello_alias() -> None:
+    packet = message.pack_ack(2, "node-a", "192.168.1.10", 6000)
+    header, payload = message.unpack_full(packet)
+    assert message.pack_ack is message.pack_hello
+    assert message.unpack_ack is message.unpack_hello
+    assert header[0] == message.MSG_HELLO
+    assert message.unpack_ack(payload) == {
         "hostname": "node-a",
         "ip": "192.168.1.10",
         "port": 6000,

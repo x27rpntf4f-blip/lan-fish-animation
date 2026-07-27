@@ -30,9 +30,10 @@ configuration.
 | `src/audio_manager.py` | 48 |
 | `src/config.py` | 26 |
 
-`tests/legacy/test_message_v1.py` characterizes the V1 packet header and round
-trips for HELLO, HEARTBEAT, TOPOLOGY, TRANSFER, GOODBYE, SPRITE_PING,
-SPRITE_REQ, and SPRITE_CHUNK.
+`tests/legacy/test_message_v1.py` explicitly inventories all nine V1 constants
+and characterizes the packet header plus HELLO, ACK (the legacy HELLO pack/unpack
+alias), HEARTBEAT, TOPOLOGY, TRANSFER, GOODBYE, SPRITE_PING, SPRITE_REQ, and
+SPRITE_CHUNK round trips.
 
 ## Confirmed defects and M1 actions
 
