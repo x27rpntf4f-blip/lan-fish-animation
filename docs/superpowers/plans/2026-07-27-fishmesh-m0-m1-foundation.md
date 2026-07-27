@@ -18,6 +18,8 @@
 - Use stable, deterministic tests; GUI smoke tests use SDL dummy drivers.
 - New or changed behavior is implemented test-first.
 - Commit only files belonging to the current task; preserve unrelated worktree changes.
+- M1 sprite retry guarantees retry until at least one complete frame is stored; full multi-frame manifests and missing-frame recovery belong to M2 protocol V2.
+- M1 quality gates cover new runtime packages, tests, and scripts; report generators and extracted legacy backups remain outside the lint/type-check scope.
 
 ---
 
@@ -115,6 +117,7 @@ addopts = "-ra --strict-markers"
 [tool.ruff]
 target-version = "py311"
 line-length = 100
+exclude = ["_zip_extract", "node_modules", "generate_*.py", "build_cheatsheet_pdf.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
@@ -347,7 +350,7 @@ Expected: FAIL because the tracker does not exist.
 
 - [ ] **Step 3: Implement the minimal tracker and integrate it**
 
-Store `dict[str, float]` deadlines. Replace dynamic `reg._pending_requests` sets with one tracker created during app startup and passed to `handle_network_message`. When a full sprite type becomes locally available, call `mark_complete(info["name"])`. Both heartbeat and sprite-ping request paths call `should_request` and `mark_requested`.
+Store `dict[str, float]` deadlines. Replace dynamic `reg._pending_requests` sets with one tracker created during app startup and passed to `handle_network_message`. When at least one complete sprite frame becomes locally available, call `mark_complete(info["name"])`. Both heartbeat and sprite-ping request paths call `should_request` and `mark_requested`. Record the V1 limitation explicitly: because the packet format has no total-frame manifest, M1 cannot detect a missing later frame after the type directory becomes visible; M2 protocol V2 owns full multi-frame completeness and missing-frame recovery.
 
 - [ ] **Step 4: Verify retry behavior and protocol compatibility**
 
@@ -697,8 +700,8 @@ def test_readme_contains_required_workflows() -> None:
         "uv sync --extra dev",
         "uv run fishmesh-demo",
         "uv run pytest",
-        "uv run ruff check .",
-        "uv run ty check",
+        "uv run ruff check src/fishmesh src/fish_demo tests scripts",
+        "uv run ty check src/fishmesh src/fish_demo",
     ):
         assert command in text
 ```
@@ -723,15 +726,15 @@ strategy:
     python: ["3.11", "3.12", "3.13"]
 ```
 
-Install uv using the official maintained GitHub Action pinned to a major version, install the requested matrix Python, run `uv sync --extra dev`, then Ruff, ty, pytest with coverage, and the headless runtime smoke test. Set SDL dummy drivers for the test steps.
+Install uv using `astral-sh/setup-uv@v6`, install the requested matrix Python, run `uv sync --extra dev`, then Ruff over `src/fishmesh src/fish_demo tests scripts`, ty over `src/fishmesh src/fish_demo`, pytest with coverage, and the headless runtime smoke test. Set SDL dummy drivers for the test steps.
 
 - [ ] **Step 4: Run the complete local M0-M1 quality gate**
 
 Run:
 
 ```bash
-uv run ruff check .
-uv run ty check
+uv run ruff check src/fishmesh src/fish_demo tests scripts
+uv run ty check src/fishmesh src/fish_demo
 uv run pytest --cov=src --cov-report=term-missing
 uv run python -m compileall -q src
 git diff --check
@@ -772,11 +775,11 @@ Run:
 
 ```bash
 git status --short
-git diff --stat HEAD~10..HEAD
+git diff --stat "$(git merge-base main HEAD)"..HEAD
 git log --oneline --decorate -12
 ```
 
-Expected: Unrelated pre-existing user changes remain uncommitted and untouched. M0-M1 commits contain only planned files.
+Expected: The isolated worktree is clean and M0-M1 commits contain only planned files. The controller separately verifies that pre-existing changes in the original checkout remain untouched.
 
 - [ ] **Step 3: Write the release record**
 
