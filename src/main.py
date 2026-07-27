@@ -18,6 +18,7 @@ from background_manager import BackgroundManager
 from config import load, save
 from fish_entity import Fish
 from fishmesh.errors import PacketDecodeError
+from fishmesh.request_tracker import RequestTracker
 from network import HostRegistry, NetworkManager
 from renderer import draw_all_fish, draw_background, draw_hud, safe_font
 from sprite_manager import SpriteManager
@@ -152,8 +153,19 @@ def _send_sprite_data_async(sprite_mgr, net, target_ip, target_port,
 
 # ── network message handler (extended) ────────────────────
 
+def _request_missing_sprites(remote_types, sender_ip, sender_port, net, reg,
+                             sprite_mgr, request_tracker):
+    my_types = set(sprite_mgr.get_types())
+    for remote_type in remote_types:
+        if (remote_type and remote_type not in my_types and
+                request_tracker.should_request(remote_type)):
+            request_tracker.mark_requested(remote_type)
+            req = msg.pack_sprite_request(reg.my_id, remote_type)
+            net.send(sender_ip, sender_port, req)
+
+
 def handle_network_message(data, addr, net, reg, fishes, screen_w, screen_h,
-                           sprite_mgr, sync_mgr):
+                           sprite_mgr, sync_mgr, request_tracker=None):
     sender_ip = addr[0]
 
     try:
@@ -231,15 +243,9 @@ def handle_network_message(data, addr, net, reg, fishes, screen_w, screen_h,
                 net.send(sender_ip, addr[1], hello)
         # ── end heartbeat-triggered discovery ──────────────────────
 
-        remote_types = hb_info["types"]
-        my_types = set(sprite_mgr.get_types())
-        if not hasattr(reg, "_pending_requests"):
-            reg._pending_requests = set()
-        for rt in remote_types:
-            if rt and rt not in my_types and rt not in reg._pending_requests:
-                reg._pending_requests.add(rt)
-                req = msg.pack_sprite_request(reg.my_id, rt)
-                net.send(sender_ip, addr[1], req)
+        if request_tracker is not None:
+            _request_missing_sprites(hb_info["types"], sender_ip, addr[1], net,
+                                     reg, sprite_mgr, request_tracker)
 
     elif mtype == msg.MSG_TOPOLOGY:
         entries = decoded
@@ -296,15 +302,9 @@ def handle_network_message(data, addr, net, reg, fishes, screen_w, screen_h,
         fishes.append(fish)
 
     elif mtype == msg.MSG_SPRITE_PING:
-        remote_types = decoded
-        my_types = set(sprite_mgr.get_types())
-        if not hasattr(reg, "_pending_requests"):
-            reg._pending_requests = set()
-        for rt in remote_types:
-            if rt and rt not in my_types and rt not in reg._pending_requests:
-                reg._pending_requests.add(rt)
-                req = msg.pack_sprite_request(reg.my_id, rt)
-                net.send(sender_ip, addr[1], req)
+        if request_tracker is not None:
+            _request_missing_sprites(decoded, sender_ip, addr[1], net, reg,
+                                     sprite_mgr, request_tracker)
 
     elif mtype == msg.MSG_SPRITE_REQ:
         name = decoded
@@ -319,6 +319,11 @@ def handle_network_message(data, addr, net, reg, fishes, screen_w, screen_h,
             # New sprite frame stored — rescan and update fish types
             sprite_mgr._scan_sprites_dir()
             Fish.AVAILABLE_TYPES = sprite_mgr.get_types()
+            if request_tracker is not None:
+                request_tracker.mark_complete(info["name"])
+            # V1 has no total-frame manifest: one completed frame proves the
+            # type is usable but cannot reveal missing later frames. M2/V2
+            # owns full multi-frame completeness and recovery.
 
     elif mtype == msg.MSG_GOODBYE:
         key = f"{sender_ip}:{addr[1]}"
@@ -411,6 +416,9 @@ def main():
 
     # Sprite sync manager — reassembles incoming chunks
     sync_mgr = SpriteSyncManager(sprite_mgr.SPRITE_DIR)
+    request_tracker = RequestTracker(
+        retry_after=float(cfg["Network"]["heartbeat_interval"]),
+    )
 
     # Network init
     start_port = args.port if args.port else int(cfg["Network"]["port"])
@@ -429,7 +437,7 @@ def main():
             if addr[0] == reg.my_ip and addr[1] == net.port:
                 continue
             handle_network_message(data, addr, net, reg, [], W, H,
-                                   sprite_mgr, sync_mgr)
+                                   sprite_mgr, sync_mgr, request_tracker)
         except queue.Empty:
             time.sleep(0.05)
 
@@ -544,7 +552,7 @@ def main():
             if addr[0] == reg.my_ip and addr[1] == net.port:
                 continue
             handle_network_message(data, addr, net, reg, fishes, W, H,
-                                   sprite_mgr, sync_mgr)
+                                   sprite_mgr, sync_mgr, request_tracker)
 
         if paused:
             bg_manager.draw(screen)
