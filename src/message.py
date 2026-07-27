@@ -1,7 +1,9 @@
-import struct
-import time
 import math
 import socket
+import struct
+import time
+
+from fishmesh.errors import PacketDecodeError
 
 MSG_HELLO        = 0x01
 MSG_ACK          = 0x02
@@ -42,9 +44,28 @@ def pack_full(msg_type, sender_id, payload):
     return pack_header(msg_type, sender_id, payload) + payload
 
 
-def unpack_full(data):
-    hdr = unpack_header(data)
-    payload = data[HEADER_SIZE:HEADER_SIZE + hdr[3]]
+def unpack_full(data: bytes) -> tuple[tuple[int, int, int, int], bytes]:
+    if len(data) < HEADER_SIZE:
+        raise PacketDecodeError(
+            f"packet header is truncated: expected {HEADER_SIZE} bytes, got {len(data)}"
+        )
+
+    try:
+        hdr = unpack_header(data)
+    except struct.error as exc:
+        raise PacketDecodeError("packet header could not be decoded") from exc
+
+    if hdr[0] not in MSG_NAMES:
+        raise PacketDecodeError(f"unsupported message type: {hdr[0]}")
+
+    payload_end = HEADER_SIZE + hdr[3]
+    if len(data) < payload_end:
+        available = len(data) - HEADER_SIZE
+        raise PacketDecodeError(
+            f"packet payload is truncated: declared {hdr[3]} bytes, got {available}"
+        )
+
+    payload = data[HEADER_SIZE:payload_end]
     return hdr, payload
 
 

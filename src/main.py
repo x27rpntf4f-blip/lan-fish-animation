@@ -1,29 +1,32 @@
-import sys
+import argparse
+import ctypes
+import logging
+import math
 import os
 import queue
+import sys
+import threading
 import time
-import argparse
-import threading, math
-import ctypes
 
 sys.path.insert(0, os.path.dirname(__file__))
 
 import pygame
 
-from config import load, save
-from fish_entity import Fish
-from renderer import draw_background, draw_all_fish, draw_hud, safe_font
+import message as msg
 from audio_manager import AudioManager
 from background_manager import BackgroundManager
+from config import load, save
+from fish_entity import Fish
+from fishmesh.errors import PacketDecodeError
+from network import HostRegistry, NetworkManager
+from renderer import draw_all_fish, draw_background, draw_hud, safe_font
 from sprite_manager import SpriteManager
 from sprite_sync import SpriteSyncManager
-from network import NetworkManager, HostRegistry
 from ui import ConfigPanel
-import message as msg
-
 
 BRIDGE_ZONE = 60
 CHUNK_SIZE = 460   # max data bytes per SPRITE_CHUNK (keep frame < 512)
+logger = logging.getLogger(__name__)
 
 # ── fullscreen helpers ────────────────────────────────────
 
@@ -153,7 +156,17 @@ def handle_network_message(data, addr, net, reg, fishes, screen_w, screen_h,
                            sprite_mgr, sync_mgr):
     sender_ip = addr[0]
 
-    hdr, payload = msg.unpack_full(data)
+    try:
+        hdr, payload = msg.unpack_full(data)
+    except PacketDecodeError as exc:
+        logger.warning(
+            "Discarding malformed UDP packet from %s:%s: %s",
+            addr[0],
+            addr[1],
+            exc,
+        )
+        return
+
     mtype, sender_id = hdr[0], hdr[1]
 
     if mtype == msg.MSG_HELLO:
