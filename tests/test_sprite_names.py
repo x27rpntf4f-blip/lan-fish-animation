@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
+import fishmesh.sprite_names as sprite_names_module
 import main
 import message
 from fishmesh.request_tracker import RequestTracker
@@ -250,6 +252,147 @@ def test_parent_swap_after_final_validation_is_rejected_and_rolled_back(
     assert attacked
     assert manager.pending_count() == 0
     assert not (moved_dir / "Fish-1.png").exists()
+
+
+def test_no_dirfd_fallback_rejects_before_double_parent_swap_can_write_outside_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sprite_root = tmp_path / "sprites"
+    sprite_dir = sprite_root / "Purple"
+    moved_app = tmp_path / "moved-app"
+    decoy = tmp_path / "decoy"
+    sprite_dir.mkdir(parents=True)
+    decoy.mkdir()
+    manager = SpriteSyncManager(sprite_root)
+    real_os = os
+    original_replace = os.replace
+    original_snapshot = sprite_names_module._directory_snapshot
+    snapshot_calls = 0
+    replace_calls = 0
+
+    class NoDirFdOs:
+        name = "java"
+
+        def __getattr__(self, attribute: str):
+            return getattr(real_os, attribute)
+
+    def first_parent_swap(src, dst, *args, **kwargs):
+        nonlocal replace_calls
+        replace_calls += 1
+        sprite_dir.rename(moved_app)
+        sprite_dir.symlink_to(moved_app, target_is_directory=True)
+        return original_replace(src, dst, *args, **kwargs)
+
+    def second_parent_swap(*args, **kwargs):
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        if snapshot_calls == 3:
+            sprite_dir.unlink()
+            sprite_dir.symlink_to(decoy, target_is_directory=True)
+        return original_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(sprite_names_module, "os", NoDirFdOs())
+    monkeypatch.setattr(
+        sprite_names_module, "_supports_directory_fd_replace", lambda: False, raising=False
+    )
+    monkeypatch.setattr(
+        sprite_names_module, "_is_windows_platform", lambda: False, raising=False
+    )
+    monkeypatch.setattr(real_os, "replace", first_parent_swap)
+    monkeypatch.setattr(sprite_names_module, "_directory_snapshot", second_parent_swap)
+
+    with pytest.raises(InvalidSpriteName):
+        manager.feed_chunk(
+            {
+                "name": "Purple",
+                "frame_index": 0,
+                "total_chunks": 1,
+                "chunk_index": 0,
+                "data": b"frame",
+            }
+        )
+
+    assert replace_calls == 0
+    assert manager.pending_count() == 0
+    assert not (moved_app / "Fish-1.png").exists()
+
+
+def test_windows_directory_guard_spans_replace_and_postcheck(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    original_replace = os.replace
+
+    @contextmanager
+    def guard(_directory: Path):
+        events.append("guard-enter")
+
+        def verify() -> None:
+            events.append("guard-verify")
+
+        try:
+            yield verify
+        finally:
+            events.append("guard-exit")
+
+    def observed_replace(src, dst, *args, **kwargs):
+        events.append("replace")
+        return original_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(
+        sprite_names_module, "_supports_directory_fd_replace", lambda: False, raising=False
+    )
+    monkeypatch.setattr(
+        sprite_names_module, "_is_windows_platform", lambda: True, raising=False
+    )
+    monkeypatch.setattr(
+        sprite_names_module, "_open_windows_directory_guard", guard, raising=False
+    )
+    monkeypatch.setattr(os, "replace", observed_replace)
+
+    destination = sprite_names_module.atomic_write_sprite_bytes(
+        tmp_path, "Purple", "Fish-1.png", b"frame"
+    )
+
+    replace_index = events.index("replace")
+    assert events.index("guard-enter") < replace_index < events.index("guard-exit")
+    assert "guard-verify" in events[:replace_index]
+    assert "guard-verify" in events[replace_index + 1 :]
+    assert destination.read_bytes() == b"frame"
+
+
+def test_windows_directory_guard_failure_prevents_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    replace_calls = 0
+
+    @contextmanager
+    def failing_guard(_directory: Path):
+        raise InvalidSpriteName("directory lock unavailable")
+        yield
+
+    def forbidden_replace(*_args, **_kwargs):
+        nonlocal replace_calls
+        replace_calls += 1
+
+    monkeypatch.setattr(
+        sprite_names_module, "_supports_directory_fd_replace", lambda: False, raising=False
+    )
+    monkeypatch.setattr(
+        sprite_names_module, "_is_windows_platform", lambda: True, raising=False
+    )
+    monkeypatch.setattr(
+        sprite_names_module, "_open_windows_directory_guard", failing_guard, raising=False
+    )
+    monkeypatch.setattr(os, "replace", forbidden_replace)
+
+    with pytest.raises(InvalidSpriteName, match="lock unavailable"):
+        sprite_names_module.atomic_write_sprite_bytes(
+            tmp_path, "Purple", "Fish-1.png", b"frame"
+        )
+
+    assert replace_calls == 0
+    assert not (tmp_path / "Purple" / "Fish-1.png").exists()
 
 
 def test_failed_frame_write_clears_completed_pending_entry(

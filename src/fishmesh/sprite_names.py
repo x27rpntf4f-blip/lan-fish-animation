@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import ctypes
+import inspect
 import os
 import stat
 import tempfile
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import BinaryIO
 
@@ -138,6 +141,131 @@ def _assert_directory_snapshot(
         raise InvalidSpriteName("sprite directory changed during write")
 
 
+def _detect_directory_fd_replace_support() -> bool:
+    if os.name != "posix" or os.rename not in os.supports_dir_fd:
+        return False
+    try:
+        parameters = inspect.signature(os.replace).parameters
+    except (TypeError, ValueError):
+        return False
+    return "src_dir_fd" in parameters and "dst_dir_fd" in parameters
+
+
+_DIRECTORY_FD_REPLACE_SUPPORTED = _detect_directory_fd_replace_support()
+
+
+def _supports_directory_fd_replace() -> bool:
+    return os.name == "posix" and _DIRECTORY_FD_REPLACE_SUPPORTED
+
+
+def _is_windows_platform() -> bool:
+    return os.name == "nt"
+
+
+@contextmanager
+def _open_windows_directory_guard(directory: Path) -> Iterator[Callable[[], None]]:
+    """Hold a non-delete-sharing Windows directory handle across replacement."""
+    from ctypes import wintypes
+
+    class ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+    ]
+
+    try:
+        win_dll = ctypes.__dict__.get("WinDLL")
+        if not callable(win_dll):
+            raise AttributeError("ctypes.WinDLL is unavailable")
+        kernel32 = win_dll("kernel32", use_last_error=True)
+    except (AttributeError, OSError) as exc:
+        raise InvalidSpriteName("Windows directory locking is unavailable") from exc
+
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    get_information = kernel32.GetFileInformationByHandle
+    get_information.argtypes = [wintypes.HANDLE, ctypes.POINTER(ByHandleFileInformation)]
+    get_information.restype = wintypes.BOOL
+    get_final_path = kernel32.GetFinalPathNameByHandleW
+    get_final_path.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+    get_final_path.restype = wintypes.DWORD
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    file_share_read = 0x00000001
+    file_share_write = 0x00000002
+    open_existing = 3
+    file_flag_open_reparse_point = 0x00200000
+    file_flag_backup_semantics = 0x02000000
+    file_attribute_reparse_point = 0x00000400
+    handle = create_file(
+        str(directory),
+        0,
+        file_share_read | file_share_write,
+        None,
+        open_existing,
+        file_flag_backup_semantics | file_flag_open_reparse_point,
+        None,
+    )
+    if handle == ctypes.c_void_p(-1).value:
+        raise InvalidSpriteName("could not lock sprite directory without delete sharing")
+
+    expected_path = os.path.normcase(os.path.abspath(directory))
+
+    def _normalized_handle_path() -> str:
+        required = get_final_path(handle, None, 0, 0)
+        if required == 0:
+            raise InvalidSpriteName("could not resolve locked sprite directory")
+        buffer = ctypes.create_unicode_buffer(required + 1)
+        if get_final_path(handle, buffer, len(buffer), 0) == 0:
+            raise InvalidSpriteName("could not resolve locked sprite directory")
+        value = buffer.value
+        if value.startswith("\\\\?\\UNC\\"):
+            value = "\\\\" + value[8:]
+        elif value.startswith("\\\\?\\"):
+            value = value[4:]
+        return os.path.normcase(os.path.abspath(value))
+
+    def verify() -> None:
+        information = ByHandleFileInformation()
+        if not get_information(handle, ctypes.byref(information)):
+            raise InvalidSpriteName("could not verify locked sprite directory")
+        if information.dwFileAttributes & file_attribute_reparse_point:
+            raise InvalidSpriteName("sprite directory cannot be a Windows reparse point")
+        metadata = directory.lstat()
+        if getattr(metadata, "st_file_attributes", 0) & file_attribute_reparse_point:
+            raise InvalidSpriteName("sprite directory cannot be a Windows reparse point")
+        file_index = (information.nFileIndexHigh << 32) | information.nFileIndexLow
+        if metadata.st_ino and metadata.st_ino != file_index:
+            raise InvalidSpriteName("locked sprite directory identity changed")
+        if _normalized_handle_path() != expected_path:
+            raise InvalidSpriteName("locked sprite directory path changed")
+
+    try:
+        verify()
+        yield verify
+    finally:
+        close_handle(handle)
+
+
 def atomic_replace_sprite_file(
     sprite_root: str | Path,
     sprite_name: str,
@@ -158,99 +286,118 @@ def atomic_replace_sprite_file(
     destination = destination_dir / filename
     _validate_replace_target(destination)
 
-    directory_fd: int | None = None
-    if os.name == "posix":
-        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-        directory_fd = os.open(destination_dir, directory_flags)
-        if _identity(os.fstat(directory_fd)) != directory_identity:
-            os.close(directory_fd)
-            raise InvalidSpriteName("sprite directory changed while opening")
-
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=destination_dir,
-        prefix=f".{filename}.",
-        suffix=".png",
-    )
-    temporary = Path(temporary_name)
-    temporary_filename = temporary.name
-    temporary_identity = _identity(os.fstat(descriptor))
-    replaced = False
-    try:
-        entry = _entry_metadata(destination_dir, directory_fd, temporary_filename)
-        if not stat.S_ISREG(entry.st_mode) or _identity(entry) != temporary_identity:
-            raise InvalidSpriteName("sprite temporary file changed after creation")
-
-        with os.fdopen(descriptor, "w+b") as stream:
-            descriptor = -1
-            writer(stream)
-            stream.flush()
-            os.fsync(stream.fileno())
-            opened_identity = _identity(os.fstat(stream.fileno()))
-
-        entry = _entry_metadata(destination_dir, directory_fd, temporary_filename)
-        if (
-            opened_identity != temporary_identity
-            or not stat.S_ISREG(entry.st_mode)
-            or _identity(entry) != temporary_identity
-        ):
-            raise InvalidSpriteName("sprite temporary file changed during write")
-
-        _assert_directory_snapshot(
-            sprite_root,
-            sprite_name,
-            root,
-            destination_dir,
-            root_identity,
-            directory_identity,
-        )
-        _validate_replace_target(destination)
-        if directory_fd is not None:
-            os.replace(
-                temporary_filename,
-                filename,
-                src_dir_fd=directory_fd,
-                dst_dir_fd=directory_fd,
+    with ExitStack() as resources:
+        directory_fd: int | None = None
+        verify_native_guard: Callable[[], None] | None = None
+        if _supports_directory_fd_replace():
+            directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            directory_fd = os.open(destination_dir, directory_flags)
+            resources.callback(os.close, directory_fd)
+            if _identity(os.fstat(directory_fd)) != directory_identity:
+                raise InvalidSpriteName("sprite directory changed while opening")
+        elif _is_windows_platform():
+            verify_native_guard = resources.enter_context(
+                _open_windows_directory_guard(destination_dir)
+            )
+            verify_native_guard()
+            _assert_directory_snapshot(
+                sprite_root,
+                sprite_name,
+                root,
+                destination_dir,
+                root_identity,
+                directory_identity,
             )
         else:
-            os.replace(temporary, destination)
-        replaced = True
+            raise InvalidSpriteName("safe atomic sprite replacement is unavailable")
 
-        final_metadata = _entry_metadata(destination_dir, directory_fd, filename)
-        if (
-            not stat.S_ISREG(final_metadata.st_mode)
-            or _identity(final_metadata) != temporary_identity
-        ):
-            raise InvalidSpriteName("sprite frame changed during replacement")
-        _assert_directory_snapshot(
-            sprite_root,
-            sprite_name,
-            root,
-            destination_dir,
-            root_identity,
-            directory_identity,
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=destination_dir,
+            prefix=f".{filename}.",
+            suffix=".png",
         )
-        if directory_fd is not None:
-            os.fsync(directory_fd)
-    except BaseException:
-        if replaced:
+        temporary = Path(temporary_name)
+        temporary_filename = temporary.name
+        temporary_identity = _identity(os.fstat(descriptor))
+        replaced = False
+        try:
+            entry = _entry_metadata(destination_dir, directory_fd, temporary_filename)
+            if not stat.S_ISREG(entry.st_mode) or _identity(entry) != temporary_identity:
+                raise InvalidSpriteName("sprite temporary file changed after creation")
+
+            with os.fdopen(descriptor, "w+b") as stream:
+                descriptor = -1
+                writer(stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+                opened_identity = _identity(os.fstat(stream.fileno()))
+
+            entry = _entry_metadata(destination_dir, directory_fd, temporary_filename)
+            if (
+                opened_identity != temporary_identity
+                or not stat.S_ISREG(entry.st_mode)
+                or _identity(entry) != temporary_identity
+            ):
+                raise InvalidSpriteName("sprite temporary file changed during write")
+
+            _assert_directory_snapshot(
+                sprite_root,
+                sprite_name,
+                root,
+                destination_dir,
+                root_identity,
+                directory_identity,
+            )
+            if verify_native_guard is not None:
+                verify_native_guard()
+            _validate_replace_target(destination)
+            if directory_fd is not None:
+                os.replace(
+                    temporary_filename,
+                    filename,
+                    src_dir_fd=directory_fd,
+                    dst_dir_fd=directory_fd,
+                )
+            else:
+                os.replace(temporary, destination)
+            replaced = True
+
+            final_metadata = _entry_metadata(destination_dir, directory_fd, filename)
+            if (
+                not stat.S_ISREG(final_metadata.st_mode)
+                or _identity(final_metadata) != temporary_identity
+            ):
+                raise InvalidSpriteName("sprite frame changed during replacement")
+            if verify_native_guard is not None:
+                verify_native_guard()
+            _assert_directory_snapshot(
+                sprite_root,
+                sprite_name,
+                root,
+                destination_dir,
+                root_identity,
+                directory_identity,
+            )
+            if directory_fd is not None:
+                os.fsync(directory_fd)
+        except BaseException:
+            if replaced:
+                _safe_unlink_entry(
+                    destination_dir,
+                    directory_fd,
+                    filename,
+                    temporary_identity,
+                )
+            raise
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
             _safe_unlink_entry(
                 destination_dir,
                 directory_fd,
-                filename,
+                temporary_filename,
                 temporary_identity,
             )
-        raise
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        _safe_unlink_entry(
-            destination_dir,
-            directory_fd,
-            temporary_filename,
-            temporary_identity,
-        )
-        if directory_fd is not None:
-            os.close(directory_fd)
     return destination
 
 
