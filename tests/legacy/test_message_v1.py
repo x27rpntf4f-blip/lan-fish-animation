@@ -150,5 +150,5 @@ def test_legacy_baseline_capture_reports_measured_facts(tmp_path: Path) -> None:
     assert captured["message_header_bytes"] == 8
     assert captured["message_type_count"] == 9
     assert captured["sprite_type_count"] == 10
-    assert captured["tracked_personal_paths"] == ["C:/Users/Athur/OneDrive/ͼƬ/OIP-C.png"]
+    assert captured["tracked_personal_paths"] == []
     assert captured["source_lines"]["src/message.py"] > 0
