@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import main
+import fish_demo.app as main
 
 
 class _Screen:
@@ -169,7 +169,7 @@ def test_interactive_save_keeps_diagnostic_overrides_out_of_config(
     monkeypatch.setattr(
         main,
         "parse_args",
-        lambda: SimpleNamespace(
+        lambda _argv=None: SimpleNamespace(
             port=6200,
             expected_hosts=None,
             run_seconds=0.0,
@@ -202,7 +202,7 @@ def test_pygame_initialization_exception_still_quits_pygame(
     monkeypatch.setattr(
         main,
         "parse_args",
-        lambda: SimpleNamespace(
+        lambda _argv=None: SimpleNamespace(
             port=6200,
             expected_hosts=1,
             run_seconds=0.0,
@@ -227,7 +227,7 @@ def test_discovery_exception_cleans_every_created_runtime_resource(
     monkeypatch.setattr(
         main,
         "parse_args",
-        lambda: SimpleNamespace(
+        lambda _argv=None: SimpleNamespace(
             port=6200,
             expected_hosts=1,
             run_seconds=0.0,

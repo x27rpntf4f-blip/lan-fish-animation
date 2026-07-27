@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def _available_udp_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -18,7 +20,15 @@ def _asset_entries(project_root: Path) -> set[Path]:
     return set(sprite_root.rglob("*"))
 
 
-def test_legacy_app_starts_and_stops_headlessly() -> None:
+@pytest.mark.parametrize(
+    "command",
+    [
+        [sys.executable, "src/main.py"],
+        [sys.executable, "-m", "fish_demo"],
+    ],
+    ids=["compatibility-script", "package-module"],
+)
+def test_legacy_app_starts_and_stops_headlessly(command: list[str]) -> None:
     """Would fail if diagnostic mode waits for input or leaks its runtime."""
     project_root = Path(__file__).resolve().parents[2]
     config_path = project_root / "config.ini"
@@ -32,9 +42,8 @@ def test_legacy_app_starts_and_stops_headlessly() -> None:
     }
     try:
         result = subprocess.run(
-            [
-                sys.executable,
-                "src/main.py",
+            command
+            + [
                 "--port",
                 str(_available_udp_port()),
                 "--expected-hosts",
