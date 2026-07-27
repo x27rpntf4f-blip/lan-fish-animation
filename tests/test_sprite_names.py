@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -56,13 +57,26 @@ def test_sprite_names_must_be_at_most_64_characters_after_normalization() -> Non
         "NUL.data",
         "COM1",
         "com9.log",
+        "COM¹",
+        "com².txt",
+        "COM³.log",
         "LPT1",
         "lpt9.png",
+        "LPT¹",
+        "lpt².txt",
+        "LPT³.log",
+        "CONIN$",
+        "conout$.txt",
     ],
 )
 def test_windows_unsafe_sprite_names_are_rejected(value: str) -> None:
     with pytest.raises(InvalidSpriteName):
         validate_sprite_name(value)
+
+
+@pytest.mark.parametrize("value", ["锦鲤²", "COM🐟", "LPT十"])
+def test_non_reserved_unicode_sprite_names_remain_valid(value: str) -> None:
+    assert validate_sprite_name(value) == value
 
 
 def test_sprite_name_utf8_encoding_must_fit_v1_without_truncation() -> None:
@@ -159,6 +173,83 @@ def test_existing_frame_symlink_is_replaced_without_overwriting_target(tmp_path:
     assert outside.read_bytes() == b"outside-secret"
     assert not destination.is_symlink()
     assert destination.read_bytes() == b"safe-frame"
+
+
+def test_swapped_temporary_entry_is_rejected_without_touching_victim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sprite_root = tmp_path / "sprites"
+    sprite_dir = sprite_root / "Purple"
+    victim = tmp_path / "victim.png"
+    sprite_dir.mkdir(parents=True)
+    victim.write_bytes(b"victim")
+    manager = SpriteSyncManager(sprite_root)
+    original_fsync = os.fsync
+    attacked = False
+
+    def swap_temp_entry(descriptor: int) -> None:
+        nonlocal attacked
+        if not attacked:
+            temporary = next(sprite_dir.glob(".Fish-1.png.*.png"))
+            temporary.unlink()
+            temporary.symlink_to(victim)
+            attacked = True
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", swap_temp_entry)
+
+    with pytest.raises(InvalidSpriteName):
+        manager.feed_chunk(
+            {
+                "name": "Purple",
+                "frame_index": 0,
+                "total_chunks": 1,
+                "chunk_index": 0,
+                "data": b"frame",
+            }
+        )
+
+    assert attacked
+    assert manager.pending_count() == 0
+    assert victim.read_bytes() == b"victim"
+    assert not (sprite_dir / "Fish-1.png").exists()
+
+
+def test_parent_swap_after_final_validation_is_rejected_and_rolled_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sprite_root = tmp_path / "sprites"
+    sprite_dir = sprite_root / "Purple"
+    moved_dir = tmp_path / "moved-purple"
+    sprite_dir.mkdir(parents=True)
+    manager = SpriteSyncManager(sprite_root)
+    original_replace = os.replace
+    attacked = False
+
+    def swap_parent_then_replace(src, dst, *args, **kwargs):
+        nonlocal attacked
+        if not attacked:
+            sprite_dir.rename(moved_dir)
+            sprite_dir.symlink_to(moved_dir, target_is_directory=True)
+            attacked = True
+        return original_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", swap_parent_then_replace)
+
+    with pytest.raises(InvalidSpriteName):
+        manager.feed_chunk(
+            {
+                "name": "Purple",
+                "frame_index": 0,
+                "total_chunks": 1,
+                "chunk_index": 0,
+                "data": b"frame",
+            }
+        )
+
+    assert attacked
+    assert manager.pending_count() == 0
+    assert not (moved_dir / "Fish-1.png").exists()
 
 
 def test_failed_frame_write_clears_completed_pending_entry(

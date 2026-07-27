@@ -6,6 +6,7 @@ import tempfile
 import unicodedata
 from collections.abc import Callable
 from pathlib import Path
+from typing import BinaryIO
 
 
 class InvalidSpriteName(ValueError):
@@ -13,8 +14,12 @@ class InvalidSpriteName(ValueError):
 
 
 _WINDOWS_FORBIDDEN = frozenset('<>:"|?*')
-_WINDOWS_RESERVED = frozenset({"CON", "PRN", "AUX", "NUL"}) | frozenset(
-    {f"{prefix}{number}" for prefix in ("COM", "LPT") for number in range(1, 10)}
+_WINDOWS_RESERVED = frozenset({"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}) | frozenset(
+    {
+        f"{prefix}{suffix}"
+        for prefix in ("COM", "LPT")
+        for suffix in (*map(str, range(1, 10)), "¹", "²", "³")
+    }
 )
 
 
@@ -69,38 +74,183 @@ def _validate_replace_target(destination: Path) -> None:
     raise InvalidSpriteName("sprite frame destination must be a regular file or replaceable link")
 
 
+def _identity(metadata: os.stat_result) -> tuple[int, int]:
+    return metadata.st_dev, metadata.st_ino
+
+
+def _directory_snapshot(
+    sprite_root: str | Path,
+    sprite_name: str,
+) -> tuple[str, Path, Path, tuple[int, int], tuple[int, int]]:
+    name, destination_dir = resolve_sprite_directory(sprite_root, sprite_name)
+    root = Path(sprite_root).resolve()
+    try:
+        root_metadata = root.stat()
+        directory_metadata = destination_dir.stat()
+    except FileNotFoundError as exc:
+        raise InvalidSpriteName("sprite directory disappeared during write") from exc
+    if not stat.S_ISDIR(root_metadata.st_mode) or not stat.S_ISDIR(directory_metadata.st_mode):
+        raise InvalidSpriteName("sprite root and destination must be directories")
+    return name, root, destination_dir, _identity(root_metadata), _identity(directory_metadata)
+
+
+def _entry_metadata(directory: Path, directory_fd: int | None, filename: str) -> os.stat_result:
+    if directory_fd is not None:
+        return os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
+    return (directory / filename).lstat()
+
+
+def _safe_unlink_entry(
+    directory: Path,
+    directory_fd: int | None,
+    filename: str,
+    expected_identity: tuple[int, int],
+) -> None:
+    try:
+        metadata = _entry_metadata(directory, directory_fd, filename)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISLNK(metadata.st_mode) and _identity(metadata) != expected_identity:
+        return
+    if directory_fd is not None:
+        os.unlink(filename, dir_fd=directory_fd)
+    else:
+        (directory / filename).unlink()
+
+
+def _assert_directory_snapshot(
+    sprite_root: str | Path,
+    sprite_name: str,
+    expected_root: Path,
+    expected_directory: Path,
+    expected_root_identity: tuple[int, int],
+    expected_directory_identity: tuple[int, int],
+) -> None:
+    _, root, directory, root_identity, directory_identity = _directory_snapshot(
+        sprite_root, sprite_name
+    )
+    if (
+        root != expected_root
+        or directory != expected_directory
+        or root_identity != expected_root_identity
+        or directory_identity != expected_directory_identity
+    ):
+        raise InvalidSpriteName("sprite directory changed during write")
+
+
 def atomic_replace_sprite_file(
     sprite_root: str | Path,
     sprite_name: str,
     filename: str,
-    writer: Callable[[Path], None],
+    writer: Callable[[BinaryIO], None],
 ) -> Path:
     """Write beside the destination, sync it, then replace the directory entry."""
     _validate_file_component(filename)
     sprite_name, destination_dir = resolve_sprite_directory(sprite_root, sprite_name)
     destination_dir.mkdir(parents=True, exist_ok=True)
-    sprite_name, destination_dir = resolve_sprite_directory(sprite_root, sprite_name)
+    (
+        sprite_name,
+        root,
+        destination_dir,
+        root_identity,
+        directory_identity,
+    ) = _directory_snapshot(sprite_root, sprite_name)
     destination = destination_dir / filename
     _validate_replace_target(destination)
+
+    directory_fd: int | None = None
+    if os.name == "posix":
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        directory_fd = os.open(destination_dir, directory_flags)
+        if _identity(os.fstat(directory_fd)) != directory_identity:
+            os.close(directory_fd)
+            raise InvalidSpriteName("sprite directory changed while opening")
 
     descriptor, temporary_name = tempfile.mkstemp(
         dir=destination_dir,
         prefix=f".{filename}.",
         suffix=".png",
     )
-    os.close(descriptor)
     temporary = Path(temporary_name)
+    temporary_filename = temporary.name
+    temporary_identity = _identity(os.fstat(descriptor))
+    replaced = False
     try:
-        writer(temporary)
-        with temporary.open("rb") as stream:
+        entry = _entry_metadata(destination_dir, directory_fd, temporary_filename)
+        if not stat.S_ISREG(entry.st_mode) or _identity(entry) != temporary_identity:
+            raise InvalidSpriteName("sprite temporary file changed after creation")
+
+        with os.fdopen(descriptor, "w+b") as stream:
+            descriptor = -1
+            writer(stream)
+            stream.flush()
             os.fsync(stream.fileno())
-        _, current_dir = resolve_sprite_directory(sprite_root, sprite_name)
-        if current_dir != destination_dir:
-            raise InvalidSpriteName("sprite directory changed during write")
+            opened_identity = _identity(os.fstat(stream.fileno()))
+
+        entry = _entry_metadata(destination_dir, directory_fd, temporary_filename)
+        if (
+            opened_identity != temporary_identity
+            or not stat.S_ISREG(entry.st_mode)
+            or _identity(entry) != temporary_identity
+        ):
+            raise InvalidSpriteName("sprite temporary file changed during write")
+
+        _assert_directory_snapshot(
+            sprite_root,
+            sprite_name,
+            root,
+            destination_dir,
+            root_identity,
+            directory_identity,
+        )
         _validate_replace_target(destination)
-        os.replace(temporary, destination)
+        if directory_fd is not None:
+            os.replace(
+                temporary_filename,
+                filename,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+        else:
+            os.replace(temporary, destination)
+        replaced = True
+
+        final_metadata = _entry_metadata(destination_dir, directory_fd, filename)
+        if (
+            not stat.S_ISREG(final_metadata.st_mode)
+            or _identity(final_metadata) != temporary_identity
+        ):
+            raise InvalidSpriteName("sprite frame changed during replacement")
+        _assert_directory_snapshot(
+            sprite_root,
+            sprite_name,
+            root,
+            destination_dir,
+            root_identity,
+            directory_identity,
+        )
+        if directory_fd is not None:
+            os.fsync(directory_fd)
+    except BaseException:
+        if replaced:
+            _safe_unlink_entry(
+                destination_dir,
+                directory_fd,
+                filename,
+                temporary_identity,
+            )
+        raise
     finally:
-        temporary.unlink(missing_ok=True)
+        if descriptor >= 0:
+            os.close(descriptor)
+        _safe_unlink_entry(
+            destination_dir,
+            directory_fd,
+            temporary_filename,
+            temporary_identity,
+        )
+        if directory_fd is not None:
+            os.close(directory_fd)
     return destination
 
 
@@ -112,8 +262,8 @@ def atomic_write_sprite_bytes(
 ) -> Path:
     """Atomically replace one sprite frame with in-memory bytes."""
 
-    def _write(temporary: Path) -> None:
-        temporary.write_bytes(data)
+    def _write(temporary: BinaryIO) -> None:
+        temporary.write(data)
 
     return atomic_replace_sprite_file(
         sprite_root,

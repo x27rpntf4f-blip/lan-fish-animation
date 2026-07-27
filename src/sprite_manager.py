@@ -16,6 +16,7 @@ SpriteManager —— 鱼精灵的加载、缓存、翻转与导入。
 渲染时根据 `fish.turn_state` 二选一，避免运行时 transform。
 """
 
+import io
 import os
 import shutil
 
@@ -188,12 +189,13 @@ class SpriteManager:
             new_name = f"Fish-{i}.png"
             # 读取 → 缩放 → 居中到透明画布 → 落盘。
             # 保留 alpha 通道（convert_alpha），避免黑底。
-            def _write_frame(temporary_path, source=src, source_name=fname):
+            def _write_frame(temporary_stream, source=src, source_name=fname):
                 try:
                     img = pygame.image.load(source).convert_alpha()
                     w, h = img.get_width(), img.get_height()
                     if w <= 0 or h <= 0:
-                        shutil.copy2(source, temporary_path)
+                        with open(source, "rb") as source_stream:
+                            shutil.copyfileobj(source_stream, temporary_stream)
                         return
                     scale = 256.0 / max(w, h)
                     new_w = max(1, round(w * scale))
@@ -203,10 +205,13 @@ class SpriteManager:
                     ox = (256 - new_w) // 2
                     oy = (256 - new_h) // 2
                     canvas.blit(scaled, (ox, oy))
-                    pygame.image.save(canvas, temporary_path)
+                    encoded = io.BytesIO()
+                    pygame.image.save(canvas, encoded, ".png")
+                    temporary_stream.write(encoded.getvalue())
                 except pygame.error as e:
                     print(f"[SpriteManager] import: failed to process {source_name}: {e}")
-                    shutil.copy2(source, temporary_path)
+                    with open(source, "rb") as source_stream:
+                        shutil.copyfileobj(source_stream, temporary_stream)
 
             atomic_replace_sprite_file(self.SPRITE_DIR, display_name, new_name, _write_frame)
 
