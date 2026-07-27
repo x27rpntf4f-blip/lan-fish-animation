@@ -19,7 +19,12 @@ from config import load, save
 from fish_entity import Fish
 from fishmesh.errors import PacketDecodeError
 from fishmesh.request_tracker import RequestTracker
-from fishmesh.sprite_names import InvalidSpriteName, resolve_sprite_directory, validate_sprite_name
+from fishmesh.sprite_names import (
+    InvalidSpriteName,
+    read_regular_sprite_file,
+    resolve_sprite_directory,
+    validate_sprite_name,
+)
 from network import HostRegistry, NetworkManager
 from renderer import draw_all_fish, draw_background, draw_hud, safe_font
 from sprite_manager import SpriteManager
@@ -130,9 +135,7 @@ def _send_sprite_data_async(sprite_mgr, net, target_ip, target_port,
     if os.path.isdir(folder):
         for fname in sorted(os.listdir(folder)):
             if fname.lower().startswith("fish-") and fname.lower().endswith(".png"):
-                path = os.path.join(folder, fname)
-                with open(path, "rb") as f:
-                    frames.append(f.read())
+                frames.append(read_regular_sprite_file(sprite_mgr.SPRITE_DIR, _name, fname))
     if not frames:
         return
 
@@ -330,7 +333,7 @@ def handle_network_message(data, addr, net, reg, fishes, screen_w, screen_h,
             sprite_mgr._scan_sprites_dir()
             Fish.AVAILABLE_TYPES = sprite_mgr.get_types()
             if request_tracker is not None:
-                request_tracker.mark_complete(info["name"])
+                request_tracker.mark_complete(validate_sprite_name(info["name"]))
             # V1 has no total-frame manifest: one completed frame proves the
             # type is usable but cannot reveal missing later frames. M2/V2
             # owns full multi-frame completeness and recovery.
@@ -339,6 +342,19 @@ def handle_network_message(data, addr, net, reg, fishes, screen_w, screen_h,
         key = f"{sender_ip}:{addr[1]}"
         reg.remove_by_key(key)
         reg.rebuild_topology()
+
+
+def _handle_sprite_import(sprite_mgr, panel, bg_manager, name, source_folder):
+    try:
+        ok = sprite_mgr.import_sprites(source_folder, name)
+    except InvalidSpriteName as exc:
+        print(f"[SpriteManager] import: invalid sprite name: {exc}")
+        return False
+    if ok:
+        Fish.AVAILABLE_TYPES = sprite_mgr.get_types()
+        panel.refresh_fish_types()
+        panel.set_bg_type(bg_manager.bg_type)
+    return ok
 
 
 def main():
@@ -416,12 +432,7 @@ def main():
     panel.set_sprite_manager(sprite_mgr)
 
     def _on_import_sprite(name, src_folder):
-            ok = sprite_mgr.import_sprites(src_folder, name)
-            if ok:
-                Fish.AVAILABLE_TYPES = sprite_mgr.get_types()
-                panel.refresh_fish_types()
-                panel.set_bg_type(bg_manager.bg_type)
-            return ok
+        return _handle_sprite_import(sprite_mgr, panel, bg_manager, name, src_folder)
     panel.set_on_import(_on_import_sprite)
 
     # Sprite sync manager — reassembles incoming chunks

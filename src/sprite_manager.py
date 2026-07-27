@@ -21,7 +21,7 @@ import shutil
 
 import pygame
 
-from fishmesh.sprite_names import resolve_sprite_directory
+from fishmesh.sprite_names import atomic_replace_sprite_file, resolve_sprite_directory
 
 
 class SpriteManager:
@@ -186,31 +186,29 @@ class SpriteManager:
         for i, fname in enumerate(png_files, start=1):
             src = os.path.join(source_folder, fname)
             new_name = f"Fish-{i}.png"
-            dst = os.path.join(dest, new_name)
             # 读取 → 缩放 → 居中到透明画布 → 落盘。
             # 保留 alpha 通道（convert_alpha），避免黑底。
-            try:
-                img = pygame.image.load(src).convert_alpha()
-                w, h = img.get_width(), img.get_height()
-                if w <= 0 or h <= 0:
-                    # 异常尺寸直接拷贝，跳过归一化
-                    shutil.copy2(src, dst)
-                    continue
-                # 等比缩放：长边归一到 256
-                scale = 256.0 / max(w, h)
-                new_w = max(1, round(w * scale))
-                new_h = max(1, round(h * scale))
-                scaled = pygame.transform.smoothscale(img, (new_w, new_h))
-                # 居中：ox/oy 是把 scaled 居中到 256² 画布的左上偏移
-                canvas = pygame.Surface((256, 256), pygame.SRCALPHA)
-                ox = (256 - new_w) // 2
-                oy = (256 - new_h) // 2
-                canvas.blit(scaled, (ox, oy))
-                pygame.image.save(canvas, dst)
-            except pygame.error as e:
-                # 任何解码失败都降级为原图拷贝，保留素材
-                print(f"[SpriteManager] import: failed to process {fname}: {e}")
-                shutil.copy2(src, dst)
+            def _write_frame(temporary_path, source=src, source_name=fname):
+                try:
+                    img = pygame.image.load(source).convert_alpha()
+                    w, h = img.get_width(), img.get_height()
+                    if w <= 0 or h <= 0:
+                        shutil.copy2(source, temporary_path)
+                        return
+                    scale = 256.0 / max(w, h)
+                    new_w = max(1, round(w * scale))
+                    new_h = max(1, round(h * scale))
+                    scaled = pygame.transform.smoothscale(img, (new_w, new_h))
+                    canvas = pygame.Surface((256, 256), pygame.SRCALPHA)
+                    ox = (256 - new_w) // 2
+                    oy = (256 - new_h) // 2
+                    canvas.blit(scaled, (ox, oy))
+                    pygame.image.save(canvas, temporary_path)
+                except pygame.error as e:
+                    print(f"[SpriteManager] import: failed to process {source_name}: {e}")
+                    shutil.copy2(source, temporary_path)
+
+            atomic_replace_sprite_file(self.SPRITE_DIR, display_name, new_name, _write_frame)
 
         print(f"[SpriteManager] imported '{display_name}' with {len(png_files)} frame(s)")
         # 触发完整 rescan：flipped_frames 等缓存一并刷新

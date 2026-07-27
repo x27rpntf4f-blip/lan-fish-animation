@@ -14,10 +14,13 @@ SpriteSyncManager —— 网络精灵分片接收与重组。
 - 落盘后 main 调 sprite_mgr._scan_sprites_dir()，本地即可使用新 type。
 """
 
-import os
 from typing import TypedDict
 
-from fishmesh.sprite_names import resolve_sprite_directory, validate_sprite_name
+from fishmesh.sprite_names import (
+    atomic_write_sprite_bytes,
+    resolve_sprite_directory,
+    validate_sprite_name,
+)
 
 
 class PendingEntry(TypedDict):
@@ -80,6 +83,7 @@ class SpriteSyncManager:
         3) 位掩码比较判定完整；完整则按 idx 排序拼接、写盘、清理 entry
         """
         name = validate_sprite_name(info["name"])
+        resolve_sprite_directory(self._sprites_dir, name)
         key = (name, info["frame_index"])
         entry = self._pending.get(key)
 
@@ -120,8 +124,10 @@ class SpriteSyncManager:
                 return False
 
         data = b"".join(ordered)
-        self._save_frame(name, info["frame_index"], data)
-        del self._pending[key]
+        try:
+            self._save_frame(name, info["frame_index"], data)
+        finally:
+            self._pending.pop(key, None)
         return True
 
     def _save_frame(self, name, frame_index, data):
@@ -131,13 +137,10 @@ class SpriteSyncManager:
 
         注意：frame_index 是 0 基，但文件名是 1 基（Fish-1.png），故 +1。
         """
-        name, dest_dir = resolve_sprite_directory(self._sprites_dir, name)
-        os.makedirs(dest_dir, exist_ok=True)
         # frame_index + 1：约定 0 基 → 1 基文件名
         filename = f"Fish-{frame_index + 1}.png"
-        dest = os.path.join(dest_dir, filename)
-        with open(dest, "wb") as f:
-            f.write(data)
+        name = validate_sprite_name(name)
+        atomic_write_sprite_bytes(self._sprites_dir, name, filename, data)
         print(f"[SpriteSync] saved {filename} to {name}/")
 
     def _drop_oldest(self):
