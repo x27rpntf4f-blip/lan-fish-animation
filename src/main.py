@@ -158,6 +158,23 @@ def handle_network_message(data, addr, net, reg, fishes, screen_w, screen_h,
 
     try:
         hdr, payload = msg.unpack_full(data)
+        mtype, sender_id = hdr[0], hdr[1]
+        if mtype in (msg.MSG_HELLO, msg.MSG_ACK):
+            decoded = msg.unpack_hello(payload)
+        elif mtype == msg.MSG_HEARTBEAT:
+            decoded = msg.unpack_heartbeat(payload)
+        elif mtype == msg.MSG_TOPOLOGY:
+            decoded = msg.unpack_topology(payload)
+        elif mtype == msg.MSG_TRANSFER:
+            decoded = msg.unpack_transfer(payload)
+        elif mtype == msg.MSG_GOODBYE:
+            decoded = msg.unpack_goodbye(payload)
+        elif mtype == msg.MSG_SPRITE_PING:
+            decoded = msg.unpack_sprite_ping(payload)
+        elif mtype == msg.MSG_SPRITE_REQ:
+            decoded = msg.unpack_sprite_request(payload)
+        else:
+            decoded = msg.unpack_sprite_chunk(payload)
     except PacketDecodeError as exc:
         logger.warning(
             "Discarding malformed UDP packet from %s:%s: %s",
@@ -167,10 +184,8 @@ def handle_network_message(data, addr, net, reg, fishes, screen_w, screen_h,
         )
         return
 
-    mtype, sender_id = hdr[0], hdr[1]
-
     if mtype == msg.MSG_HELLO:
-        info = msg.unpack_hello(payload)
+        info = decoded
         # Register with self-reported IP (for heartbeat identity matching)
         # but record the actual source IP as reachable for data transmission
         reg.add_or_update(info["hostname"], info["ip"], info["port"],
@@ -182,7 +197,7 @@ def handle_network_message(data, addr, net, reg, fishes, screen_w, screen_h,
         net.send(addr[0], addr[1], ack)
 
     elif mtype == msg.MSG_ACK:
-        info = msg.unpack_ack(payload)
+        info = decoded
         reg.add_or_update(info["hostname"], info["ip"], info["port"],
                           reachable_ip=addr[0])
         reg.rebuild_topology()
@@ -194,7 +209,7 @@ def handle_network_message(data, addr, net, reg, fishes, screen_w, screen_h,
         net.broadcast(topo)
 
     elif mtype == msg.MSG_HEARTBEAT:
-        hb_info = msg.unpack_heartbeat(payload)
+        hb_info = decoded
         # Match host identity by actual UDP source address (same approach as
         # web——fish zip: sender_ip + addr[1]).  This is more reliable than
         # self-reported IP when a machine has multiple network interfaces.
@@ -227,7 +242,7 @@ def handle_network_message(data, addr, net, reg, fishes, screen_w, screen_h,
                 net.send(sender_ip, addr[1], req)
 
     elif mtype == msg.MSG_TOPOLOGY:
-        entries = msg.unpack_topology(payload)
+        entries = decoded
         for e in entries:
             key = f"{e['ip']}:{e['port']}"
             if key != reg.my_key and key not in reg.hosts:
@@ -239,7 +254,7 @@ def handle_network_message(data, addr, net, reg, fishes, screen_w, screen_h,
         reg.rebuild_topology()
 
     elif mtype == msg.MSG_TRANSFER:
-        info = msg.unpack_transfer(payload)
+        info = decoded
         if any(f.fish_id == info["fish_id"] for f in fishes):
             return
 
@@ -281,7 +296,7 @@ def handle_network_message(data, addr, net, reg, fishes, screen_w, screen_h,
         fishes.append(fish)
 
     elif mtype == msg.MSG_SPRITE_PING:
-        remote_types = msg.unpack_sprite_ping(payload)
+        remote_types = decoded
         my_types = set(sprite_mgr.get_types())
         if not hasattr(reg, "_pending_requests"):
             reg._pending_requests = set()
@@ -292,15 +307,13 @@ def handle_network_message(data, addr, net, reg, fishes, screen_w, screen_h,
                 net.send(sender_ip, addr[1], req)
 
     elif mtype == msg.MSG_SPRITE_REQ:
-        name = msg.unpack_sprite_request(payload)
+        name = decoded
         if name and name in sprite_mgr.get_types():
             _send_sprite_data_async(sprite_mgr, net, sender_ip, addr[1],
                               reg.my_id, name)
 
     elif mtype == msg.MSG_SPRITE_CHUNK:
-        info = msg.unpack_sprite_chunk(payload)
-        if info is None:
-            return
+        info = decoded
         complete = sync_mgr.feed_chunk(info)
         if complete:
             # New sprite frame stored — rescan and update fish types

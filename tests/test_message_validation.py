@@ -27,6 +27,24 @@ def test_unpack_full_rejects_unknown_message_type() -> None:
         message.unpack_full(packet)
 
 
+def test_unpack_full_rejects_surplus_payload_bytes() -> None:
+    packet = message.pack_full(message.MSG_HELLO, 0, b"") + b"surplus"
+    with pytest.raises(PacketDecodeError, match="payload"):
+        message.unpack_full(packet)
+
+
+@pytest.mark.parametrize(
+    ("decoder", "payload"),
+    [
+        (message.unpack_hello, b""),
+        (message.unpack_heartbeat, b"\x01\x03ab"),
+    ],
+)
+def test_type_decoder_rejects_semantically_malformed_payload(decoder, payload: bytes) -> None:
+    with pytest.raises(PacketDecodeError, match="payload"):
+        decoder(payload)
+
+
 def test_handler_discards_malformed_packet_without_mutating_state(caplog) -> None:
     untouched_fish = object()
     fishes = [untouched_fish]
@@ -44,5 +62,47 @@ def test_handler_discards_malformed_packet_without_mutating_state(caplog) -> Non
             object(),
         )
 
+    assert fishes == [untouched_fish]
+    assert "Discarding malformed UDP packet" in caplog.text
+
+
+class MutationProbe:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def __getattr__(self, name: str):
+        def record_call(*args, **kwargs):
+            self.calls.append(name)
+
+        return record_call
+
+
+@pytest.mark.parametrize(
+    "packet",
+    [
+        message.pack_full(message.MSG_HELLO, 0, b""),
+        message.pack_full(message.MSG_HEARTBEAT, 0, b"\x01\x03ab"),
+    ],
+    ids=["hello", "heartbeat"],
+)
+def test_handler_discards_malformed_body_without_mutating_state(packet: bytes, caplog) -> None:
+    registry = MutationProbe()
+    untouched_fish = object()
+    fishes = [untouched_fish]
+
+    with caplog.at_level(logging.WARNING):
+        main.handle_network_message(
+            packet,
+            ("192.0.2.10", 6000),
+            MutationProbe(),
+            registry,
+            fishes,
+            800,
+            600,
+            MutationProbe(),
+            MutationProbe(),
+        )
+
+    assert registry.calls == []
     assert fishes == [untouched_fish]
     assert "Discarding malformed UDP packet" in caplog.text
