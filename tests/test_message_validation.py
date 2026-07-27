@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import struct
 
 import pytest
 
@@ -45,6 +46,41 @@ def test_type_decoder_rejects_semantically_malformed_payload(decoder, payload: b
         decoder(payload)
 
 
+def transfer_payload(name: bytes) -> bytes:
+    prefix = struct.pack(message.TRANSFER_PREFIX_FMT, 1, 0.0, 0.0, 0.0, 1.0, 1.0, 1, 2, 3)
+    return prefix + bytes([len(name)]) + name + b"\x00\x00\x01"
+
+
+def sprite_chunk_payload(name: bytes) -> bytes:
+    return struct.pack("!BBBBH", len(name), 0, 1, 0, 0) + name
+
+
+@pytest.mark.parametrize(
+    ("decoder", "payload", "message_name"),
+    [
+        (message.unpack_heartbeat, b"\x01\x01\xff", "HEARTBEAT"),
+        (message.unpack_transfer, transfer_payload(b"\xff"), "TRANSFER"),
+        (message.unpack_sprite_ping, b"\x01\x01\xff", "SPRITE_PING"),
+        (message.unpack_sprite_request, b"\x01\xff", "SPRITE_REQ"),
+        (message.unpack_sprite_chunk, sprite_chunk_payload(b"\xff"), "SPRITE_CHUNK"),
+    ],
+)
+def test_type_decoder_rejects_invalid_utf8(decoder, payload: bytes, message_name: str) -> None:
+    with pytest.raises(PacketDecodeError, match=message_name):
+        decoder(payload)
+
+
+def test_type_decoders_preserve_valid_unicode_names() -> None:
+    name = "锦鲤"
+    encoded = name.encode("utf-8")
+
+    assert message.unpack_heartbeat(bytes([1, len(encoded)]) + encoded) == {"types": [name]}
+    assert message.unpack_transfer(transfer_payload(encoded))["fish_type"] == name
+    assert message.unpack_sprite_ping(bytes([1, len(encoded)]) + encoded) == [name]
+    assert message.unpack_sprite_request(bytes([len(encoded)]) + encoded) == name
+    assert message.unpack_sprite_chunk(sprite_chunk_payload(encoded))["name"] == name
+
+
 def test_handler_discards_malformed_packet_without_mutating_state(caplog) -> None:
     untouched_fish = object()
     fishes = [untouched_fish]
@@ -82,8 +118,9 @@ class MutationProbe:
     [
         message.pack_full(message.MSG_HELLO, 0, b""),
         message.pack_full(message.MSG_HEARTBEAT, 0, b"\x01\x03ab"),
+        message.pack_full(message.MSG_HEARTBEAT, 0, b"\x01\x01\xff"),
     ],
-    ids=["hello", "heartbeat"],
+    ids=["hello", "truncated-heartbeat", "invalid-utf8-heartbeat"],
 )
 def test_handler_discards_malformed_body_without_mutating_state(packet: bytes, caplog) -> None:
     registry = MutationProbe()

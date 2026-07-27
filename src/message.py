@@ -31,6 +31,15 @@ HEADER_FMT = "!BBIH"  # type, sender_id, timestamp_ms, payload_len
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
 
 
+def _decode_text(raw: bytes, message_name: str, field: str) -> str:
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PacketDecodeError(
+            f"{message_name} payload contains invalid UTF-8 in {field}"
+        ) from exc
+
+
 def pack_header(msg_type, sender_id, payload):
     ts = int(time.time() * 1000) & 0xFFFFFFFF
     return struct.pack(HEADER_FMT, msg_type, sender_id, ts, len(payload))
@@ -91,10 +100,7 @@ def unpack_hello(payload):
             f"HELLO payload length mismatch: expected {expected_size} bytes, got {len(payload)}"
         )
 
-    try:
-        hostname = payload[1:1 + name_len].decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise PacketDecodeError("HELLO payload contains an invalid UTF-8 hostname") from exc
+    hostname = _decode_text(payload[1:1 + name_len], "HELLO", "hostname")
 
     off = 1 + name_len
     ip = socket.inet_ntoa(payload[off:off + 4])
@@ -143,7 +149,7 @@ def unpack_heartbeat(payload):
         pos += 1
         if pos + name_len > len(payload):
             raise PacketDecodeError("HEARTBEAT payload contains a truncated sprite name")
-        name = payload[pos:pos + name_len].decode("utf-8", errors="replace")
+        name = _decode_text(payload[pos:pos + name_len], "HEARTBEAT", "sprite name")
         types.append(name)
         pos += name_len
 
@@ -221,7 +227,7 @@ def unpack_transfer(payload):
     if len(tail) >= 2:
         name_len = tail[0]
         if name_len > 0 and len(tail) >= 1 + name_len + 3:
-            fish_type = tail[1:1 + name_len].decode("utf-8", errors="replace")
+            fish_type = _decode_text(tail[1:1 + name_len], "TRANSFER", "fish type")
             rem = tail[1 + name_len:]
             src_w = (rem[0] << 8) | rem[1] if len(rem) > 1 else 0
             heading_byte = rem[2] if len(rem) > 2 else 1
@@ -286,7 +292,7 @@ def unpack_sprite_ping(payload):
         pos += 1
         if pos + name_len > len(payload):
             raise PacketDecodeError("SPRITE_PING payload contains a truncated sprite name")
-        name = payload[pos:pos + name_len].decode("utf-8", errors="replace")
+        name = _decode_text(payload[pos:pos + name_len], "SPRITE_PING", "sprite name")
         types.append(name)
         pos += name_len
 
@@ -316,7 +322,7 @@ def unpack_sprite_request(payload):
         )
     if name_len == 0:
         return ""
-    return payload[1:1 + name_len].decode("utf-8", errors="replace")
+    return _decode_text(payload[1:1 + name_len], "SPRITE_REQ", "sprite name")
 
 
 # ── SPRITE DATA CHUNK ──
@@ -346,7 +352,7 @@ def unpack_sprite_chunk(payload):
             f"SPRITE_CHUNK payload length mismatch: expected {expected_size} bytes, "
             f"got {len(payload)}"
         )
-    name = payload[6:6 + name_len].decode("utf-8", errors="replace")
+    name = _decode_text(payload[6:6 + name_len], "SPRITE_CHUNK", "sprite name")
     data_start = 6 + name_len
     data = payload[data_start:data_start + data_len]
     return {
