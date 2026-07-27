@@ -19,6 +19,7 @@ SpriteManager —— 鱼精灵的加载、缓存、翻转与导入。
 import io
 import logging
 import os
+import re
 import shutil
 
 import pygame
@@ -73,6 +74,16 @@ class SpriteManager:
         """
         if not os.path.isdir(self.OLD_DIR):
             return
+        if os.path.isdir(self.SPRITE_DIR):
+            for type_name in os.listdir(self.SPRITE_DIR):
+                type_dir = os.path.join(self.SPRITE_DIR, type_name)
+                if not os.path.isdir(type_dir):
+                    continue
+                if any(
+                    re.fullmatch(r"Fish-\d+\.png", file_name, re.IGNORECASE)
+                    for file_name in os.listdir(type_dir)
+                ):
+                    return
         dest = os.path.join(self.SPRITE_DIR, "Free Fish Icons")
         if os.path.isdir(dest):
             return  # 已经迁移过，幂等

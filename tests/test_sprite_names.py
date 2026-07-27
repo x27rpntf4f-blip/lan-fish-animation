@@ -434,6 +434,49 @@ def test_local_import_rejects_path_escape_before_creating_destination(tmp_path: 
     assert not (tmp_path / "escape").exists()
 
 
+def test_legacy_migration_leaves_populated_canonical_tree_unchanged(tmp_path: Path) -> None:
+    old_root = tmp_path / "Free Fish Icons"
+    sprite_root = tmp_path / "fish_sprites"
+    canonical_frame = sprite_root / "Fish A" / "Fish-1.png"
+    old_root.mkdir()
+    canonical_frame.parent.mkdir(parents=True)
+    (old_root / "FishA-2.png").write_bytes(b"legacy-frame")
+    canonical_frame.write_bytes(b"canonical-frame")
+    manager = SpriteManager.__new__(SpriteManager)
+    manager.OLD_DIR = str(old_root)
+    manager.SPRITE_DIR = str(sprite_root)
+    inventory_before = {
+        path.relative_to(sprite_root): path.read_bytes()
+        for path in sprite_root.rglob("*")
+        if path.is_file()
+    }
+
+    manager._migrate_if_needed()
+
+    inventory_after = {
+        path.relative_to(sprite_root): path.read_bytes()
+        for path in sprite_root.rglob("*")
+        if path.is_file()
+    }
+    assert inventory_after == inventory_before
+    assert not (sprite_root / "Free Fish Icons").exists()
+
+
+def test_legacy_migration_populates_canonical_tree_when_it_has_no_frames(tmp_path: Path) -> None:
+    old_root = tmp_path / "Free Fish Icons"
+    sprite_root = tmp_path / "fish_sprites"
+    old_root.mkdir()
+    sprite_root.mkdir()
+    (old_root / "FishA-1.png").write_bytes(b"legacy-frame")
+    manager = SpriteManager.__new__(SpriteManager)
+    manager.OLD_DIR = str(old_root)
+    manager.SPRITE_DIR = str(sprite_root)
+
+    manager._migrate_if_needed()
+
+    assert (sprite_root / "Fish A" / "Fish-1.png").read_bytes() == b"legacy-frame"
+
+
 def test_local_import_replaces_frame_symlink_without_overwriting_target(tmp_path: Path) -> None:
     source = tmp_path / "source"
     sprite_root = tmp_path / "sprites"
