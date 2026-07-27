@@ -3,6 +3,8 @@ import socket
 import threading
 import time
 
+from fishmesh.logging import log_rate_limited_event
+
 logger = logging.getLogger(__name__)
 
 
@@ -50,9 +52,13 @@ class HostRegistry:
             if ip and not ip.startswith("127."):
                 return ip
         except Exception as exc:
-            logger.debug(
+            log_rate_limited_event(
+                logger,
+                logging.DEBUG,
                 "Default-route IP probe failed",
-                extra={"event": "local_ip_probe_failed", "error": str(exc)},
+                event="local_ip_probe_failed",
+                stable_key="default-route",
+                extra={"error": str(exc)},
             )
 
         # Strategy 2: old method (may pick wrong interface on multi-homed machines
@@ -62,9 +68,13 @@ class HostRegistry:
             s.connect(("10.255.255.255", 1))
             ip = s.getsockname()[0]
         except Exception as exc:
-            logger.debug(
+            log_rate_limited_event(
+                logger,
+                logging.DEBUG,
                 "Fallback IP probe failed",
-                extra={"event": "local_ip_fallback_failed", "error": str(exc)},
+                event="local_ip_fallback_failed",
+                stable_key="fallback-route",
+                extra={"error": str(exc)},
             )
             ip = "127.0.0.1"
         finally:
@@ -193,9 +203,13 @@ class NetworkManager:
             try:
                 self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
             except OSError as exc:
-                logger.debug(
+                log_rate_limited_event(
+                    logger,
+                    logging.DEBUG,
                     "SO_REUSEPORT is unavailable",
-                    extra={"event": "socket_option_unavailable", "error": str(exc)},
+                    event="socket_option_unavailable",
+                    stable_key="SO_REUSEPORT",
+                    extra={"error": str(exc)},
                 )
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -215,13 +229,14 @@ class NetworkManager:
                 self.sock.bind(("0.0.0.0", port + off))
                 return port + off
             except OSError as exc:
-                logger.debug(
+                peer = f"0.0.0.0:{port + off}"
+                log_rate_limited_event(
+                    logger,
+                    logging.DEBUG,
                     "UDP port is unavailable",
-                    extra={
-                        "event": "socket_bind_failed",
-                        "peer": f"0.0.0.0:{port + off}",
-                        "error": str(exc),
-                    },
+                    event="socket_bind_failed",
+                    stable_key=peer,
+                    extra={"peer": peer, "error": str(exc)},
                 )
                 continue
         raise RuntimeError(f"Cannot bind to any port {port}-{port + 9}")
@@ -246,9 +261,13 @@ class NetworkManager:
             except TimeoutError:
                 pass
             except Exception as exc:
-                logger.warning(
+                log_rate_limited_event(
+                    logger,
+                    logging.WARNING,
                     "UDP listener failed",
-                    extra={"event": "packet_receive_failed", "error": str(exc)},
+                    event="packet_receive_failed",
+                    stable_key="listener",
+                    extra={"error": str(exc)},
                 )
 
             # Send any pending heartbeat from the network thread so
@@ -275,26 +294,28 @@ class NetworkManager:
         try:
             self.sock.sendto(data, ("255.255.255.255", self.broadcast_base))
         except OSError as exc:
-            logger.warning(
+            peer = f"255.255.255.255:{self.broadcast_base}"
+            log_rate_limited_event(
+                logger,
+                logging.WARNING,
                 "UDP broadcast failed",
-                extra={
-                    "event": "packet_broadcast_failed",
-                    "peer": f"255.255.255.255:{self.broadcast_base}",
-                    "error": str(exc),
-                },
+                event="packet_broadcast_failed",
+                stable_key=peer,
+                extra={"peer": peer, "error": str(exc)},
             )
 
     def send(self, ip, port, data):
         try:
             self.sock.sendto(data, (ip, port))
         except OSError as exc:
-            logger.warning(
+            peer = f"{ip}:{port}"
+            log_rate_limited_event(
+                logger,
+                logging.WARNING,
                 "UDP send failed",
-                extra={
-                    "event": "packet_send_failed",
-                    "peer": f"{ip}:{port}",
-                    "error": str(exc),
-                },
+                event="packet_send_failed",
+                stable_key=peer,
+                extra={"peer": peer, "error": str(exc)},
             )
 
     def send_known(self, data, registry):
@@ -311,7 +332,11 @@ class NetworkManager:
         try:
             self.sock.close()
         except Exception as exc:
-            logger.debug(
+            log_rate_limited_event(
+                logger,
+                logging.DEBUG,
                 "UDP socket close failed",
-                extra={"event": "socket_close_failed", "error": str(exc)},
+                event="socket_close_failed",
+                stable_key="socket",
+                extra={"error": str(exc)},
             )

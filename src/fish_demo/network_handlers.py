@@ -8,6 +8,7 @@ import threading
 import message as msg
 from fish_entity import Fish
 from fishmesh.errors import PacketDecodeError
+from fishmesh.logging import log_rate_limited_event
 from fishmesh.sprite_names import (
     InvalidSpriteName,
     read_regular_sprite_file,
@@ -98,13 +99,14 @@ def handle_network_message(
         else:
             decoded = msg.unpack_sprite_chunk(payload)
     except PacketDecodeError as exc:
-        logger.warning(
+        peer = f"{addr[0]}:{addr[1]}"
+        log_rate_limited_event(
+            logger,
+            logging.WARNING,
             "Discarding malformed UDP packet",
-            extra={
-                "event": "packet_discarded",
-                "peer": f"{addr[0]}:{addr[1]}",
-                "error": str(exc),
-            },
+            event="packet_discarded",
+            stable_key=peer,
+            extra={"peer": peer, "error": str(exc)},
         )
         return
 

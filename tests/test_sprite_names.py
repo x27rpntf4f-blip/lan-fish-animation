@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import contextmanager
 from pathlib import Path
@@ -615,9 +616,17 @@ def test_ui_import_callback_turns_invalid_name_into_failed_import(caplog) -> Non
 
     background = type("BackgroundDouble", (), {"bg_type": "gradient"})()
 
-    assert main._handle_sprite_import(
-        SpriteManagerDouble(), PanelDouble(), background, "CON", "/tmp/source"
-    ) is False
+    app_logger = logging.getLogger("fish_demo.app")
+    original_propagate = app_logger.propagate
+    app_logger.addHandler(caplog.handler)
+    app_logger.propagate = False
+    try:
+        assert main._handle_sprite_import(
+            SpriteManagerDouble(), PanelDouble(), background, "CON", "/tmp/source"
+        ) is False
+    finally:
+        app_logger.removeHandler(caplog.handler)
+        app_logger.propagate = original_propagate
     record = caplog.records[-1]
     assert record.event == "sprite_import_rejected"
     assert record.sprite_name == "CON"

@@ -6,9 +6,11 @@ from collections.abc import Callable
 
 import pytest
 
+import fishmesh.logging as mesh_logging
 import main
 import message
 from fishmesh.errors import PacketDecodeError
+from fishmesh.logging import EventRateLimiter
 
 
 @pytest.mark.parametrize("packet", [b"", b"\x01", b"\x01\x02\x03\x04\x05\x06\x07"])
@@ -189,7 +191,12 @@ class MutationProbe:
     ],
     ids=["hello", "truncated-heartbeat", "invalid-utf8-heartbeat"],
 )
-def test_handler_discards_malformed_body_without_mutating_state(packet: bytes, caplog) -> None:
+def test_handler_discards_malformed_body_without_mutating_state(
+    packet: bytes,
+    caplog,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(mesh_logging, "_NETWORK_EVENT_LIMITER", EventRateLimiter())
     registry = MutationProbe()
     untouched_fish = object()
     fishes = [untouched_fish]

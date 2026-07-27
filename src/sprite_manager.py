@@ -99,7 +99,10 @@ class SpriteManager:
 
         logger.info(
             "Migrated legacy sprite assets",
-            extra={"event": "sprite_migration_completed", "path": self.SPRITE_DIR},
+            extra={
+                "event": "sprite_migration_completed",
+                "sprite_root": os.path.basename(os.path.normpath(self.SPRITE_DIR)),
+            },
         )
 
     def _scan_sprites_dir(self):
@@ -150,7 +153,7 @@ class SpriteManager:
                             "event": "sprite_frame_load_failed",
                             "sprite_name": folder,
                             "frame_index": frame_index,
-                            "path": fpath,
+                            "file_name": fname,
                             "error": str(exc),
                         },
                     )
@@ -172,7 +175,7 @@ class SpriteManager:
             extra={
                 "event": "sprite_catalog_loaded",
                 "sprite_count": loaded,
-                "path": self.SPRITE_DIR,
+                "sprite_root": os.path.basename(os.path.normpath(self.SPRITE_DIR)),
             },
         )
 
@@ -197,7 +200,7 @@ class SpriteManager:
                 extra={
                     "event": "sprite_import_rejected",
                     "sprite_name": display_name,
-                    "path": source_folder,
+                    "source": os.path.basename(os.path.normpath(source_folder)),
                     "error": "source is not a directory",
                 },
             )
@@ -211,7 +214,7 @@ class SpriteManager:
                 extra={
                     "event": "sprite_import_rejected",
                     "sprite_name": display_name,
-                    "path": source_folder,
+                    "source": os.path.basename(os.path.normpath(source_folder)),
                     "error": "source contains no PNG files",
                 },
             )
@@ -255,7 +258,7 @@ class SpriteManager:
                             "event": "sprite_frame_import_failed",
                             "sprite_name": sprite_name,
                             "frame_index": import_index,
-                            "path": source,
+                            "file_name": source_name,
                             "error": str(exc),
                         },
                     )
