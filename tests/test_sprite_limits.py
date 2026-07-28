@@ -9,7 +9,9 @@ import pygame
 import pytest
 
 import fish_demo.network_handlers as network_handlers
+import message
 import sprite_manager as sprite_module
+from fishmesh.request_tracker import RequestTracker
 from fishmesh.sprite_names import InvalidSpriteName
 from sprite_manager import SpriteManager
 
@@ -113,3 +115,105 @@ def test_worker_records_oversized_frame_rejection_then_serves_next_job(
     assert len(rejected) == 1
     assert rejected[0].frame_bytes == 103_041
     assert valid_sent is True
+
+
+def test_oversized_only_type_is_not_advertised_or_retried(
+    tmp_path: Path,
+) -> None:
+    pygame.display.set_mode((1, 1))
+    root = tmp_path / "sprites"
+    oversized = root / "OversizedOnly"
+    oversized.mkdir(parents=True)
+    (oversized / "Fish-1.png").write_bytes(b"x" * 103_041)
+    provider = SpriteManager.__new__(SpriteManager)
+    provider.SPRITE_DIR = root
+    provider._scan_sprites_dir()
+
+    assert provider.get_types() == []
+
+    now = [100.0]
+    tracker = RequestTracker(retry_after=1.0, clock=lambda: now[0])
+    sent: list[bytes] = []
+
+    class Net:
+        port = 6201
+
+        def send(self, _ip: str, _port: int, packet: bytes) -> None:
+            sent.append(packet)
+
+    class Registry:
+        my_id = 2
+        my_hostname = "receiver"
+        my_ip = "192.0.2.20"
+        my_key = "192.0.2.20:6201"
+        hosts = {"192.0.2.10:6200": object()}
+
+        def heartbeat(self, *_args, **_kwargs) -> None:
+            pass
+
+    receiver = type("ReceiverSprites", (), {"get_types": lambda _self: []})()
+    packets = (
+        message.pack_heartbeat(1, sprite_types=provider.get_types()),
+        message.pack_sprite_ping(1, provider.get_types()),
+    )
+    for _ in range(3):
+        for packet in packets:
+            network_handlers.handle_network_message(
+                packet,
+                ("192.0.2.10", 6200),
+                Net(),
+                Registry(),
+                [],
+                800,
+                600,
+                receiver,
+                object(),
+                request_tracker=tracker,
+            )
+        now[0] += 2.0
+
+    assert sent == []
+    assert tracker.should_request("OversizedOnly") is True
+
+
+def test_mixed_type_is_advertised_and_worker_sends_only_legal_frames(
+    tmp_path: Path,
+) -> None:
+    pygame.display.set_mode((1, 1))
+    root = tmp_path / "sprites"
+    mixed = root / "Mixed"
+    mixed.mkdir(parents=True)
+    (mixed / "Fish-1.png").write_bytes(b"x" * 103_041)
+    (mixed / "Fish-2.png").write_bytes(b"valid")
+    provider = SpriteManager.__new__(SpriteManager)
+    provider.SPRITE_DIR = root
+    provider._scan_sprites_dir()
+
+    assert provider.get_types() == ["Mixed"]
+    _, heartbeat_payload = message.unpack_full(
+        message.pack_heartbeat(1, sprite_types=provider.get_types())
+    )
+    _, ping_payload = message.unpack_full(message.pack_sprite_ping(1, provider.get_types()))
+    assert message.unpack_heartbeat(heartbeat_payload)["types"] == ["Mixed"]
+    assert message.unpack_sprite_ping(ping_payload) == ["Mixed"]
+
+    sent: list[bytes] = []
+
+    class Net:
+        def send(self, _ip: str, _port: int, packet: bytes) -> None:
+            sent.append(packet)
+
+    worker = network_handlers.SpriteSendWorker(root, Net(), max_pending=1)
+    try:
+        assert worker.submit("192.0.2.10", 6200, 1, "Mixed") is True
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline and not sent:
+            time.sleep(0.005)
+    finally:
+        worker.stop()
+
+    chunks = []
+    for packet in sent:
+        _, payload = message.unpack_full(packet)
+        chunks.append(message.unpack_sprite_chunk(payload))
+    assert [(chunk["frame_index"], chunk["data"]) for chunk in chunks] == [(1, b"valid")]

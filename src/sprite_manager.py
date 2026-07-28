@@ -232,6 +232,24 @@ class SpriteManager:
                 for f in os.listdir(folder_path)
                 if f.lower().startswith("fish-") and f.lower().endswith(".png")
             )
+            sendable_png_files = []
+            for fname in png_files:
+                try:
+                    frame_data = read_regular_file(folder_path, fname)
+                    validate_sprite_frame_bytes(frame_data)
+                except InvalidSpriteName as exc:
+                    logger.warning(
+                        "Excluded unsendable sprite frame from catalog",
+                        extra={
+                            "event": "sprite_frame_catalog_rejected",
+                            "sprite_name": folder,
+                            "file_name": fname,
+                            "error": str(exc),
+                        },
+                    )
+                    continue
+                sendable_png_files.append(fname)
+            png_files = sendable_png_files
             if not png_files:
                 continue
 

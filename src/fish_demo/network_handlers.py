@@ -101,7 +101,7 @@ class SpriteSendWorker:
                         "peer": f"{job.target_ip}:{job.target_port}",
                     },
                 )
-                return
+                continue
             total = max(1, (len(raw) + CHUNK_SIZE - 1) // CHUNK_SIZE)
             for chunk_index in range(total):
                 if self._stop.is_set():
