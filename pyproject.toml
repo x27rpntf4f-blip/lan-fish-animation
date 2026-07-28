@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fishmesh"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "pygame>=2.5,<3",
+]
+
+[project.optional-dependencies]
+video = [
+    "opencv-python>=4.8,<5",
+    "numpy>=1.26,<3",
+]
+dev = [
+    "pytest>=8,<9",
+    "pytest-cov>=5,<7",
+    "ruff>=0.9,<1",
+    "ty>=0.0.1a20",
+]
+
+[project.scripts]
+fishmesh-demo = "fish_demo.app:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = [
+    "audio_manager",
+    "background_manager",
+    "config",
+    "fish_entity",
+    "main",
+    "message",
+    "network",
+    "renderer",
+    "sprite_manager",
+    "sprite_sync",
+    "ui",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"fish_demo.resources" = ["water.wav", "fish_sprites/*/*.png"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra --strict-markers"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = ["_zip_extract", "node_modules", "generate_*.py", "build_cheatsheet_pdf.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

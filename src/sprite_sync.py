@@ -14,8 +14,32 @@ SpriteSyncManager —— 网络精灵分片接收与重组。
 - 落盘后 main 调 sprite_mgr._scan_sprites_dir()，本地即可使用新 type。
 """
 
-import os
-import struct
+import logging
+from typing import TypedDict
+
+import message
+from fishmesh.errors import PacketDecodeError
+from fishmesh.sprite_names import (
+    atomic_write_sprite_bytes,
+    resolve_sprite_directory,
+    validate_sprite_name,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class PendingEntry(TypedDict):
+    total: int
+    received: int
+    chunks: dict[int, bytes]
+
+
+class SpriteChunkInfo(TypedDict):
+    name: str
+    frame_index: int
+    total_chunks: int
+    chunk_index: int
+    data: bytes
 
 
 class SpriteSyncManager:
@@ -46,11 +70,11 @@ class SpriteSyncManager:
         """
         self._sprites_dir = sprites_dir
         # 未完成帧表：key 是 (sprite_name, frame_index) 元组，value 见类注释。
-        self._pending = {}
+        self._pending: dict[tuple[str, int], PendingEntry] = {}
 
     # ── feed a chunk ──────────────────────────────────────────
 
-    def feed_chunk(self, info):
+    def feed_chunk(self, info: SpriteChunkInfo) -> bool:
         """
         处理一个 SPRITE_CHUNK 消息字典（由 message.unpack_sprite_chunk 解出）。
 
@@ -63,30 +87,43 @@ class SpriteSyncManager:
         2) 写入当前 chunk（重复则覆盖，幂等）
         3) 位掩码比较判定完整；完整则按 idx 排序拼接、写盘、清理 entry
         """
-        key = (info["name"], info["frame_index"])
+        name = validate_sprite_name(info["name"])
+        resolve_sprite_directory(self._sprites_dir, name)
+        key = (name, info["frame_index"])
+        total = info["total_chunks"]
+        chunk_index = info["chunk_index"]
+        chunk_data = info["data"]
+        if not 1 <= total <= message.MAX_SPRITE_CHUNKS:
+            raise PacketDecodeError("SPRITE_CHUNK total chunk count is outside protocol range")
+        if not 0 <= chunk_index < total:
+            raise PacketDecodeError("SPRITE_CHUNK chunk index is outside the frame")
+        if len(chunk_data) > message.MAX_SPRITE_CHUNK_BYTES:
+            raise PacketDecodeError("SPRITE_CHUNK chunk data exceeds protocol limit")
         entry = self._pending.get(key)
+
+        if entry is not None and entry["total"] != total:
+            self._pending.pop(key, None)
+            raise PacketDecodeError("SPRITE_CHUNK has conflicting total chunk count")
 
         # ── 新建 entry（必要时淘汰最早一条）──
         if entry is None:
             if len(self._pending) >= self.MAX_PENDING:
                 self._drop_oldest()
-            entry = {
-                "total": info["total_chunks"],
-                "received": 0,        # 32-bit 位掩码，每位对应一个 chunk idx
-                "chunks": {},
-            }
+            entry = PendingEntry(
+                total=total,
+                received=0,  # 32-bit 位掩码，每位对应一个 chunk idx
+                chunks={},
+            )
             self._pending[key] = entry
 
         # ── 写入 chunk（重复时用新数据覆盖，等价于幂等）──
-        ci = info["chunk_index"]
+        ci = chunk_index
         if ci not in entry["chunks"]:
-            entry["chunks"][ci] = info["data"]
+            entry["chunks"][ci] = chunk_data
             # 把第 ci 位置 1；用 OR 避免重复设置产生副作用
-            entry["received"] |= (1 << ci)
+            entry["received"] |= 1 << ci
 
         # ── 完整性判定：前 total 位是否全部 1 ──
-        if entry["total"] == 0:
-            return False
         # (1 << total) - 1 即低 total 位全 1 的掩码
         expected_mask = (1 << entry["total"]) - 1
         if (entry["received"] & expected_mask) != expected_mask:
@@ -103,8 +140,10 @@ class SpriteSyncManager:
                 return False
 
         data = b"".join(ordered)
-        self._save_frame(info["name"], info["frame_index"], data)
-        del self._pending[key]
+        try:
+            self._save_frame(name, info["frame_index"], data)
+        finally:
+            self._pending.pop(key, None)
         return True
 
     def _save_frame(self, name, frame_index, data):
@@ -114,14 +153,18 @@ class SpriteSyncManager:
 
         注意：frame_index 是 0 基，但文件名是 1 基（Fish-1.png），故 +1。
         """
-        dest_dir = os.path.join(self._sprites_dir, name)
-        os.makedirs(dest_dir, exist_ok=True)
         # frame_index + 1：约定 0 基 → 1 基文件名
         filename = f"Fish-{frame_index + 1}.png"
-        dest = os.path.join(dest_dir, filename)
-        with open(dest, "wb") as f:
-            f.write(data)
-        print(f"[SpriteSync] saved {filename} to {name}/")
+        name = validate_sprite_name(name)
+        atomic_write_sprite_bytes(self._sprites_dir, name, filename, data)
+        logger.info(
+            "Saved completed sprite frame",
+            extra={
+                "event": "sprite_frame_saved",
+                "sprite_name": name,
+                "frame_index": frame_index,
+            },
+        )
 
     def _drop_oldest(self):
         """

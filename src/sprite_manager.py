@@ -16,9 +16,50 @@ SpriteManager —— 鱼精灵的加载、缓存、翻转与导入。
 渲染时根据 `fish.turn_state` 二选一，避免运行时 transform。
 """
 
+import importlib.resources
+import io
+import logging
 import os
-import shutil
+import re
+import stat
+import sys
+from pathlib import Path
+
 import pygame
+
+import message
+from fishmesh.sprite_names import (
+    InvalidSpriteName,
+    atomic_replace_sprite_file,
+    atomic_write_sprite_bytes_if_missing,
+    ensure_safe_directory,
+    read_regular_file,
+    resolve_sprite_directory,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def validate_sprite_frame_bytes(frame_data: bytes) -> bytes:
+    """Reject frames that cannot be represented by the V1 chunk protocol."""
+    if len(frame_data) > message.MAX_SPRITE_FRAME_BYTES:
+        raise InvalidSpriteName(
+            f"sprite frame exceeds V1 limit of {message.MAX_SPRITE_FRAME_BYTES} bytes"
+        )
+    return frame_data
+
+
+def _default_user_sprite_dir() -> Path:
+    override = os.environ.get("FISHMESH_DATA_DIR")
+    if override:
+        return Path(override).expanduser() / "fish_sprites"
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+        return base / "FishMesh" / "fish_sprites"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "FishMesh" / "fish_sprites"
+    base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    return base / "fishmesh" / "fish_sprites"
 
 
 class SpriteManager:
@@ -33,13 +74,23 @@ class SpriteManager:
     5. **访问**   ：按 type+frame 索引取正向/翻转 Surface，含三层 fallback
     """
 
-    # 标准精灵目录（项目根/assets/fish_sprites）。
-    # 使用 os.path.dirname(__file__) 的上一级定位项目根，保证从任意 cwd 调用都能找对路径。
-    SPRITE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                              "assets", "fish_sprites")
+    PACKAGE_SPRITE_DIR = Path(
+        str(importlib.resources.files("fish_demo.resources").joinpath("fish_sprites"))
+    )
+    # Network sync, imports, and migration always target user-writable data.
+    SPRITE_DIR = _default_user_sprite_dir()
     # 老版本 Free Fish Icons 平铺目录：仅用于一次性迁移。
-    OLD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                           "assets", "Free Fish Icons")
+    OLD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "Free Fish Icons")
+
+    def get_sprite_roots(self):
+        """Return read roots in fallback-to-override order."""
+        if "SPRITE_DIR" in self.__dict__:
+            return [Path(self.SPRITE_DIR)]
+        return [self.PACKAGE_SPRITE_DIR, Path(self.SPRITE_DIR)]
+
+    def get_sprite_send_roots(self):
+        """Return writable overrides before bundled defaults for network reads."""
+        return list(reversed(self.get_sprite_roots()))
 
     def __init__(self):
         # type 字符串 -> 该 type 的所有帧 Surface 列表（顺序与文件名一致）
@@ -59,41 +110,92 @@ class SpriteManager:
         """
         一次性迁移老格式 → 新格式。
 
-        触发条件：`assets/Free Fish Icons/` 存在 且
-                  `assets/fish_sprites/Free Fish Icons/` 不存在。
+        触发条件：`assets/Free Fish Icons/` 存在，且由合法老格式文件
+                  推导出的目标类型尚未全部具有 canonical 帧。
         动作：
             FishA-1.png, FishA-2.png, ... → fish_sprites/Fish A/Fish-1.png, ...
             FishB-1.png ...              → fish_sprites/Fish B/Fish-1.png, ...
-        即：去掉前缀 `Fish`、把类型字母单独抽成目录名。
+        已存在的 canonical 文件从不覆盖；非 legacy 目标类型不影响判定。
         """
-        if not os.path.isdir(self.OLD_DIR):
+        old_root = ensure_safe_directory(self.OLD_DIR, allow_missing=True)
+        if not old_root.exists():
             return
-        dest = os.path.join(self.SPRITE_DIR, "Free Fish Icons")
-        if os.path.isdir(dest):
-            return  # 已经迁移过，幂等
+        sprite_root = ensure_safe_directory(self.SPRITE_DIR, allow_missing=True)
 
-        os.makedirs(self.SPRITE_DIR, exist_ok=True)
-        os.makedirs(dest, exist_ok=True)
-
-        # 解析每个老文件名：FishA-1.png → type="A", frame=1
-        old_files = sorted(os.listdir(self.OLD_DIR))
-        for fname in old_files:
-            if not fname.endswith(".png") or not fname.startswith("Fish"):
+        legacy_frames = []
+        for file_name in sorted(os.listdir(old_root)):
+            match = re.fullmatch(
+                r"Fish(?P<type>[A-Za-z0-9]+)-(?P<frame>\d+)\.png",
+                file_name,
+            )
+            if match is None:
                 continue
-            # 去掉 "Fish" 前缀得到 "A-1.png" 之类
-            stem = fname[4:]
-            if "-" not in stem:
+            source = old_root / file_name
+            try:
+                source_metadata = source.lstat()
+            except FileNotFoundError:
                 continue
-            type_letter = stem[0]              # "A"
-            frame_num = stem[2:].split(".")[0]  # "1"
-            # 一个 type 一个目录，与新格式对齐
-            type_dir = os.path.join(self.SPRITE_DIR, f"Fish {type_letter}")
-            os.makedirs(type_dir, exist_ok=True)
-            new_name = f"Fish-{frame_num}.png"
-            shutil.copy2(os.path.join(self.OLD_DIR, fname),
-                         os.path.join(type_dir, new_name))
+            if not stat.S_ISREG(source_metadata.st_mode):
+                continue
+            target_type = f"Fish {match.group('type')}"
+            target_file = f"Fish-{match.group('frame')}.png"
+            legacy_frames.append((source, target_type, target_file))
 
-        print(f"[SpriteManager] migrated old sprites → {self.SPRITE_DIR}")
+        if not legacy_frames:
+            return
+
+        target_types = {target_type for _, target_type, _ in legacy_frames}
+
+        def has_canonical_frame(target_type):
+            roots = [sprite_root]
+            if "SPRITE_DIR" not in self.__dict__:
+                roots.append(self.PACKAGE_SPRITE_DIR)
+            for root in roots:
+                _, type_dir = resolve_sprite_directory(root, target_type)
+                if os.path.isdir(type_dir) and any(
+                    re.fullmatch(r"Fish-\d+\.png", file_name, re.IGNORECASE)
+                    and os.path.isfile(os.path.join(type_dir, file_name))
+                    for file_name in os.listdir(type_dir)
+                ):
+                    return True
+            return False
+
+        if all(has_canonical_frame(target_type) for target_type in target_types):
+            return
+
+        os.makedirs(sprite_root, exist_ok=True)
+        copied = False
+        for source, target_type, target_file in legacy_frames:
+            try:
+                source_data = read_regular_file(old_root, source.name)
+            except InvalidSpriteName as exc:
+                logger.warning(
+                    "Skipped unsafe legacy sprite source",
+                    extra={
+                        "event": "sprite_migration_source_rejected",
+                        "file_name": source.name,
+                        "error": str(exc),
+                    },
+                )
+                continue
+            copied = (
+                atomic_write_sprite_bytes_if_missing(
+                    sprite_root,
+                    target_type,
+                    target_file,
+                    source_data,
+                )
+                or copied
+            )
+
+        if copied:
+            logger.info(
+                "Migrated legacy sprite assets",
+                extra={
+                    "event": "sprite_migration_completed",
+                    "sprite_root": os.path.basename(os.path.normpath(self.SPRITE_DIR)),
+                },
+            )
 
     def _scan_sprites_dir(self):
         """
@@ -110,33 +212,65 @@ class SpriteManager:
         self.frames = {}
         self.flipped_frames = {}
 
-        if not os.path.isdir(self.SPRITE_DIR):
-            # 没有素材目录时也保证存在，避免后续 import 时炸
-            os.makedirs(self.SPRITE_DIR, exist_ok=True)
-            return
+        os.makedirs(self.SPRITE_DIR, exist_ok=True)
+        folders: dict[str, Path] = {}
+        for root in self.get_sprite_roots():
+            if not root.is_dir():
+                continue
+            for folder in sorted(os.listdir(root)):
+                folder_path = root / folder
+                if folder_path.is_dir():
+                    folders[folder] = folder_path
 
-        for folder in sorted(os.listdir(self.SPRITE_DIR)):
-            folder_path = os.path.join(self.SPRITE_DIR, folder)
+        for folder, folder_path in sorted(folders.items()):
             if not os.path.isdir(folder_path):
                 continue
 
             # 仅接受 Fish-N.png 命名规范的 PNG，过滤 README 等杂项
             png_files = sorted(
-                f for f in os.listdir(folder_path)
+                f
+                for f in os.listdir(folder_path)
                 if f.lower().startswith("fish-") and f.lower().endswith(".png")
             )
+            sendable_png_files = []
+            for fname in png_files:
+                try:
+                    frame_data = read_regular_file(folder_path, fname)
+                    validate_sprite_frame_bytes(frame_data)
+                except InvalidSpriteName as exc:
+                    logger.warning(
+                        "Excluded unsendable sprite frame from catalog",
+                        extra={
+                            "event": "sprite_frame_catalog_rejected",
+                            "sprite_name": folder,
+                            "file_name": fname,
+                            "error": str(exc),
+                        },
+                    )
+                    continue
+                sendable_png_files.append(fname)
+            png_files = sendable_png_files
             if not png_files:
                 continue
 
             # 逐帧加载；任一帧失败用 64×64 粉红色方块占位，保证后续索引安全
             frames = []
-            for fname in png_files:
+            for frame_index, fname in enumerate(png_files):
                 fpath = os.path.join(folder_path, fname)
                 try:
                     img = pygame.image.load(fpath).convert_alpha()
                     frames.append(img)
-                except pygame.error as e:
-                    print(f"[SpriteManager] failed to load {fpath}: {e}")
+                except pygame.error as exc:
+                    logger.warning(
+                        "Using fallback for unreadable sprite frame",
+                        extra={
+                            "event": "sprite_frame_load_failed",
+                            "sprite_name": folder,
+                            "frame_index": frame_index,
+                            "file_name": fname,
+                            "error": str(exc),
+                        },
+                    )
                     fallback = pygame.Surface((64, 64), pygame.SRCALPHA)
                     fallback.fill((255, 100, 100))
                     frames.append(fallback)
@@ -150,7 +284,14 @@ class SpriteManager:
             self.flipped_frames[folder] = flipped
 
         loaded = len(self.fish_types)
-        print(f"[SpriteManager] loaded {loaded} fish types from {self.SPRITE_DIR}")
+        logger.info(
+            "Loaded sprite types",
+            extra={
+                "event": "sprite_catalog_loaded",
+                "sprite_count": loaded,
+                "sprite_root": os.path.basename(os.path.normpath(self.SPRITE_DIR)),
+            },
+        )
 
     def import_sprites(self, source_folder, display_name):
         """
@@ -166,54 +307,84 @@ class SpriteManager:
 
         返回：成功 True / 失败 False（带原因打印）。
         """
+        display_name, dest = resolve_sprite_directory(self.SPRITE_DIR, display_name)
         if not os.path.isdir(source_folder):
-            print(f"[SpriteManager] import: not a directory: {source_folder}")
+            logger.warning(
+                "Rejected sprite import source",
+                extra={
+                    "event": "sprite_import_rejected",
+                    "sprite_name": display_name,
+                    "source": os.path.basename(os.path.normpath(source_folder)),
+                    "error": "source is not a directory",
+                },
+            )
             return False
-        if not display_name.strip():
-            print("[SpriteManager] import: empty display name")
-            return False
-
-        dest = os.path.join(self.SPRITE_DIR, display_name.strip())
-        os.makedirs(dest, exist_ok=True)
-
-        png_files = sorted(
-            f for f in os.listdir(source_folder)
-            if f.lower().endswith(".png")
-        )
+        png_files = sorted(f for f in os.listdir(source_folder) if f.lower().endswith(".png"))
         if not png_files:
-            print(f"[SpriteManager] import: no PNG files in {source_folder}")
+            logger.warning(
+                "Rejected empty sprite import",
+                extra={
+                    "event": "sprite_import_rejected",
+                    "sprite_name": display_name,
+                    "source": os.path.basename(os.path.normpath(source_folder)),
+                    "error": "source contains no PNG files",
+                },
+            )
             return False
 
+        prepared_frames: list[bytes] = []
         for i, fname in enumerate(png_files, start=1):
             src = os.path.join(source_folder, fname)
-            new_name = f"Fish-{i}.png"
-            dst = os.path.join(dest, new_name)
-            # 读取 → 缩放 → 居中到透明画布 → 落盘。
-            # 保留 alpha 通道（convert_alpha），避免黑底。
             try:
                 img = pygame.image.load(src).convert_alpha()
                 w, h = img.get_width(), img.get_height()
                 if w <= 0 or h <= 0:
-                    # 异常尺寸直接拷贝，跳过归一化
-                    shutil.copy2(src, dst)
-                    continue
-                # 等比缩放：长边归一到 256
-                scale = 256.0 / max(w, h)
-                new_w = max(1, round(w * scale))
-                new_h = max(1, round(h * scale))
-                scaled = pygame.transform.smoothscale(img, (new_w, new_h))
-                # 居中：ox/oy 是把 scaled 居中到 256² 画布的左上偏移
-                canvas = pygame.Surface((256, 256), pygame.SRCALPHA)
-                ox = (256 - new_w) // 2
-                oy = (256 - new_h) // 2
-                canvas.blit(scaled, (ox, oy))
-                pygame.image.save(canvas, dst)
-            except pygame.error as e:
-                # 任何解码失败都降级为原图拷贝，保留素材
-                print(f"[SpriteManager] import: failed to process {fname}: {e}")
-                shutil.copy2(src, dst)
+                    with open(src, "rb") as source_stream:
+                        frame_data = source_stream.read()
+                else:
+                    scale = 256.0 / max(w, h)
+                    new_w = max(1, round(w * scale))
+                    new_h = max(1, round(h * scale))
+                    scaled = pygame.transform.smoothscale(img, (new_w, new_h))
+                    canvas = pygame.Surface((256, 256), pygame.SRCALPHA)
+                    ox = (256 - new_w) // 2
+                    oy = (256 - new_h) // 2
+                    canvas.blit(scaled, (ox, oy))
+                    encoded = io.BytesIO()
+                    pygame.image.save(canvas, encoded, ".png")
+                    frame_data = encoded.getvalue()
+            except pygame.error as exc:
+                logger.warning(
+                    "Copied sprite frame without normalization",
+                    extra={
+                        "event": "sprite_frame_import_failed",
+                        "sprite_name": display_name,
+                        "frame_index": i - 1,
+                        "file_name": fname,
+                        "error": str(exc),
+                    },
+                )
+                with open(src, "rb") as source_stream:
+                    frame_data = source_stream.read()
+            prepared_frames.append(validate_sprite_frame_bytes(frame_data))
 
-        print(f"[SpriteManager] imported '{display_name}' with {len(png_files)} frame(s)")
+        os.makedirs(dest, exist_ok=True)
+        for i, frame_data in enumerate(prepared_frames, start=1):
+            new_name = f"Fish-{i}.png"
+
+            def _write_frame(temporary_stream, data=frame_data):
+                temporary_stream.write(data)
+
+            atomic_replace_sprite_file(self.SPRITE_DIR, display_name, new_name, _write_frame)
+
+        logger.info(
+            "Imported sprite type",
+            extra={
+                "event": "sprite_import_completed",
+                "sprite_name": display_name,
+                "frame_count": len(png_files),
+            },
+        )
         # 触发完整 rescan：flipped_frames 等缓存一并刷新
         self._scan_sprites_dir()
         return True

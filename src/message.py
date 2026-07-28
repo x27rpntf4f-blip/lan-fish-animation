@@ -1,7 +1,9 @@
-import struct
-import time
 import math
 import socket
+import struct
+import time
+
+from fishmesh.errors import PacketDecodeError
 
 MSG_HELLO        = 0x01
 MSG_ACK          = 0x02
@@ -27,6 +29,35 @@ MSG_NAMES = {
 
 HEADER_FMT = "!BBIH"  # type, sender_id, timestamp_ms, payload_len
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
+MAX_SPRITE_CHUNKS = 224
+MAX_SPRITE_CHUNK_BYTES = 460
+MAX_SPRITE_FRAME_BYTES = MAX_SPRITE_CHUNKS * MAX_SPRITE_CHUNK_BYTES
+
+_TRANSFER_FLOAT_RANGES = {
+    "x": (-100_000.0, 100_000.0),
+    "y": (-100_000.0, 100_000.0),
+    "direction": (-1_000.0, 1_000.0),
+    "speed": (0.0, 10_000.0),
+    "size": (0.05, 100.0),
+}
+
+
+def _encode_text(value: str, max_bytes: int = 255) -> bytes:
+    truncated = value.encode("utf-8")[:max_bytes]
+    try:
+        truncated.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        return truncated[:exc.start]
+    return truncated
+
+
+def _decode_text(raw: bytes, message_name: str, field: str) -> str:
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PacketDecodeError(
+            f"{message_name} payload contains invalid UTF-8 in {field}"
+        ) from exc
 
 
 def pack_header(msg_type, sender_id, payload):
@@ -42,9 +73,29 @@ def pack_full(msg_type, sender_id, payload):
     return pack_header(msg_type, sender_id, payload) + payload
 
 
-def unpack_full(data):
-    hdr = unpack_header(data)
-    payload = data[HEADER_SIZE:HEADER_SIZE + hdr[3]]
+def unpack_full(data: bytes) -> tuple[tuple[int, int, int, int], bytes]:
+    if len(data) < HEADER_SIZE:
+        raise PacketDecodeError(
+            f"packet header is truncated: expected {HEADER_SIZE} bytes, got {len(data)}"
+        )
+
+    try:
+        hdr = unpack_header(data)
+    except struct.error as exc:
+        raise PacketDecodeError("packet header could not be decoded") from exc
+
+    if hdr[0] not in MSG_NAMES:
+        raise PacketDecodeError(f"unsupported message type: {hdr[0]}")
+
+    actual_payload_size = len(data) - HEADER_SIZE
+    if actual_payload_size != hdr[3]:
+        raise PacketDecodeError(
+            f"packet payload length mismatch: declared {hdr[3]} bytes, "
+            f"got {actual_payload_size}"
+        )
+
+    payload_end = HEADER_SIZE + hdr[3]
+    payload = data[HEADER_SIZE:payload_end]
     return hdr, payload
 
 
@@ -52,15 +103,25 @@ def unpack_full(data):
 
 def pack_hello(sender_id, hostname, ip_str, port):
     ip_bytes = socket.inet_aton(ip_str)
-    hostname_bytes = hostname.encode("utf-8")[:32]
+    hostname_bytes = _encode_text(hostname, max_bytes=32)
     payload = struct.pack("!B", len(hostname_bytes)) + hostname_bytes + ip_bytes
     payload += struct.pack("!H", port)
     return pack_full(MSG_HELLO, sender_id, payload)
 
 
 def unpack_hello(payload):
+    if len(payload) < 1:
+        raise PacketDecodeError("HELLO payload is missing the hostname length")
+
     name_len = payload[0]
-    hostname = payload[1:1 + name_len].decode("utf-8")
+    expected_size = 1 + name_len + 4 + 2
+    if len(payload) != expected_size:
+        raise PacketDecodeError(
+            f"HELLO payload length mismatch: expected {expected_size} bytes, got {len(payload)}"
+        )
+
+    hostname = _decode_text(payload[1:1 + name_len], "HELLO", "hostname")
+
     off = 1 + name_len
     ip = socket.inet_ntoa(payload[off:off + 4])
     off += 4
@@ -86,7 +147,7 @@ def pack_heartbeat(sender_id, ip_str=None, port=None, sprite_types=None):
         payload = bytearray()
         payload.append(len(sprite_types) & 0xFF)
         for name in sprite_types:
-            nb = name.encode("utf-8")[:255]
+            nb = _encode_text(name)
             payload.append(len(nb) & 0xFF)
             payload.extend(nb)
     else:
@@ -95,25 +156,27 @@ def pack_heartbeat(sender_id, ip_str=None, port=None, sprite_types=None):
 
 
 def unpack_heartbeat(payload):
-    result = {"types": []}
     if len(payload) < 1:
-        return result
+        raise PacketDecodeError("HEARTBEAT payload is missing the sprite count")
+
     count = payload[0]
     pos = 1
-    if count > 0:
-        types = []
-        for _ in range(count):
-            if pos >= len(payload):
-                break
-            name_len = payload[pos]
-            pos += 1
-            if pos + name_len > len(payload):
-                break
-            name = payload[pos:pos + name_len].decode("utf-8", errors="replace")
-            types.append(name)
-            pos += name_len
-        result["types"] = types
-    return result
+    types = []
+    for _ in range(count):
+        if pos >= len(payload):
+            raise PacketDecodeError("HEARTBEAT payload is missing a sprite name length")
+        name_len = payload[pos]
+        pos += 1
+        if pos + name_len > len(payload):
+            raise PacketDecodeError("HEARTBEAT payload contains a truncated sprite name")
+        name = _decode_text(payload[pos:pos + name_len], "HEARTBEAT", "sprite name")
+        types.append(name)
+        pos += name_len
+
+    if pos != len(payload):
+        raise PacketDecodeError("HEARTBEAT payload contains surplus bytes")
+
+    return {"types": types}
 
 
 # ── TOPOLOGY ──
@@ -129,7 +192,16 @@ def pack_topology(sender_id, host_list):
 
 
 def unpack_topology(payload):
+    if len(payload) < 1:
+        raise PacketDecodeError("TOPOLOGY payload is missing the host count")
+
     count = payload[0]
+    expected_size = 1 + count * 8
+    if len(payload) != expected_size:
+        raise PacketDecodeError(
+            f"TOPOLOGY payload length mismatch: expected {expected_size} bytes, got {len(payload)}"
+        )
+
     hosts = []
     off = 1
     for _ in range(count):
@@ -148,14 +220,25 @@ TRANSFER_PREFIX_FMT = "!Hfffff3B"   # fish_id thru color (10 bytes)
 TRANSFER_PREFIX_SIZE = struct.calcsize(TRANSFER_PREFIX_FMT)
 
 
+def _validate_transfer_floats(values, error_type):
+    for field, value in zip(_TRANSFER_FLOAT_RANGES, values, strict=True):
+        if not math.isfinite(value):
+            raise error_type(f"TRANSFER {field} must be finite")
+        minimum, maximum = _TRANSFER_FLOAT_RANGES[field]
+        if not minimum <= value <= maximum:
+            raise error_type(
+                f"TRANSFER {field} is outside protocol range [{minimum}, {maximum}]"
+            )
+
+
 def pack_transfer(sender_id, fish, source_screen_w=0):
-    name_bytes = fish.fish_type.encode("utf-8")[:255]
+    transfer_floats = (fish.x, fish.y, fish.direction, fish.speed, fish.size)
+    _validate_transfer_floats(transfer_floats, ValueError)
+    name_bytes = _encode_text(fish.fish_type)
     src_hi = (source_screen_w >> 8) & 0xFF
     src_lo = source_screen_w & 0xFF
     heading_byte = 1 if math.cos(fish.direction) >= 0 else 0
-    prefix = struct.pack(TRANSFER_PREFIX_FMT,
-                         fish.fish_id, fish.x, fish.y, fish.direction,
-                         fish.speed, fish.size, *fish.color)
+    prefix = struct.pack(TRANSFER_PREFIX_FMT, fish.fish_id, *transfer_floats, *fish.color)
     suffix = struct.pack("!B", len(name_bytes)) + name_bytes
     suffix += struct.pack("!BB", src_hi, src_lo)
     suffix += struct.pack("!B", heading_byte)
@@ -163,13 +246,20 @@ def pack_transfer(sender_id, fish, source_screen_w=0):
 
 
 def unpack_transfer(payload):
+    if len(payload) < TRANSFER_PREFIX_SIZE:
+        raise PacketDecodeError(
+            f"TRANSFER payload is truncated: expected at least {TRANSFER_PREFIX_SIZE} bytes, "
+            f"got {len(payload)}"
+        )
+
     prefix = struct.unpack(TRANSFER_PREFIX_FMT, payload[:TRANSFER_PREFIX_SIZE])
+    _validate_transfer_floats(prefix[1:6], PacketDecodeError)
     tail = payload[TRANSFER_PREFIX_SIZE:]
 
     if len(tail) >= 2:
         name_len = tail[0]
         if name_len > 0 and len(tail) >= 1 + name_len + 3:
-            fish_type = tail[1:1 + name_len].decode("utf-8", errors="replace")
+            fish_type = _decode_text(tail[1:1 + name_len], "TRANSFER", "fish type")
             rem = tail[1 + name_len:]
             src_w = (rem[0] << 8) | rem[1] if len(rem) > 1 else 0
             heading_byte = rem[2] if len(rem) > 2 else 1
@@ -204,13 +294,18 @@ def pack_goodbye(sender_id):
     return pack_full(MSG_GOODBYE, sender_id, b"")
 
 
+def unpack_goodbye(payload):
+    if payload:
+        raise PacketDecodeError("GOODBYE payload must be empty")
+
+
 # ── SPRITE PING ──
 
 def pack_sprite_ping(sender_id, sprite_types):
     payload = bytearray()
     payload.append(len(sprite_types) & 0xFF)
     for name in sprite_types:
-        nb = name.encode("utf-8")[:255]
+        nb = _encode_text(name)
         payload.append(len(nb) & 0xFF)
         payload.extend(nb)
     return pack_full(MSG_SPRITE_PING, sender_id, bytes(payload))
@@ -218,47 +313,63 @@ def pack_sprite_ping(sender_id, sprite_types):
 
 def unpack_sprite_ping(payload):
     if len(payload) < 1:
-        return []
+        raise PacketDecodeError("SPRITE_PING payload is missing the sprite count")
     count = payload[0]
-    if count == 0:
-        return []
     types = []
     pos = 1
     for _ in range(count):
         if pos >= len(payload):
-            break
+            raise PacketDecodeError("SPRITE_PING payload is missing a sprite name length")
         name_len = payload[pos]
         pos += 1
         if pos + name_len > len(payload):
-            break
-        name = payload[pos:pos + name_len].decode("utf-8", errors="replace")
+            raise PacketDecodeError("SPRITE_PING payload contains a truncated sprite name")
+        name = _decode_text(payload[pos:pos + name_len], "SPRITE_PING", "sprite name")
         types.append(name)
         pos += name_len
+
+    if pos != len(payload):
+        raise PacketDecodeError("SPRITE_PING payload contains surplus bytes")
+
     return types
 
 
 # ── SPRITE REQUEST ──
 
 def pack_sprite_request(sender_id, sprite_name):
-    nb = sprite_name.encode("utf-8")[:255]
+    nb = _encode_text(sprite_name)
     payload = struct.pack("!B", len(nb)) + nb
     return pack_full(MSG_SPRITE_REQ, sender_id, payload)
 
 
 def unpack_sprite_request(payload):
     if len(payload) < 1:
-        return ""
+        raise PacketDecodeError("SPRITE_REQ payload is missing the sprite name length")
     name_len = payload[0]
-    if name_len == 0 or len(payload) < 1 + name_len:
+    expected_size = 1 + name_len
+    if len(payload) != expected_size:
+        raise PacketDecodeError(
+            f"SPRITE_REQ payload length mismatch: expected {expected_size} bytes, "
+            f"got {len(payload)}"
+        )
+    if name_len == 0:
         return ""
-    return payload[1:1 + name_len].decode("utf-8", errors="replace")
+    return _decode_text(payload[1:1 + name_len], "SPRITE_REQ", "sprite name")
 
 
 # ── SPRITE DATA CHUNK ──
 
 def pack_sprite_chunk(sender_id, sprite_name, frame_index, total_chunks,
                       chunk_index, data):
-    nb = sprite_name.encode("utf-8")[:255]
+    if not 1 <= total_chunks <= MAX_SPRITE_CHUNKS:
+        raise ValueError(f"SPRITE_CHUNK total_chunks must be in [1, {MAX_SPRITE_CHUNKS}]")
+    if not 0 <= chunk_index < total_chunks:
+        raise ValueError("SPRITE_CHUNK chunk_index must be less than total_chunks")
+    if len(data) > MAX_SPRITE_CHUNK_BYTES:
+        raise ValueError(
+            f"SPRITE_CHUNK data exceeds {MAX_SPRITE_CHUNK_BYTES} bytes"
+        )
+    nb = _encode_text(sprite_name)
     header = struct.pack("!BBBBH",
                          len(nb),
                          frame_index,
@@ -271,13 +382,27 @@ def pack_sprite_chunk(sender_id, sprite_name, frame_index, total_chunks,
 
 def unpack_sprite_chunk(payload):
     if len(payload) < 6:
-        return None
+        raise PacketDecodeError("SPRITE_CHUNK payload is missing its chunk header")
     name_len, frame_idx, total, chunk_idx = \
         struct.unpack("!BBBB", payload[:4])
     data_len = struct.unpack("!H", payload[4:6])[0]
-    if len(payload) < 6 + name_len + data_len:
-        return None
-    name = payload[6:6 + name_len].decode("utf-8", errors="replace")
+    if not 1 <= total <= MAX_SPRITE_CHUNKS:
+        raise PacketDecodeError(
+            f"SPRITE_CHUNK total chunk count must be in [1, {MAX_SPRITE_CHUNKS}]"
+        )
+    if chunk_idx >= total:
+        raise PacketDecodeError("SPRITE_CHUNK chunk index must be less than total chunks")
+    if data_len > MAX_SPRITE_CHUNK_BYTES:
+        raise PacketDecodeError(
+            f"SPRITE_CHUNK chunk data exceeds {MAX_SPRITE_CHUNK_BYTES} bytes"
+        )
+    expected_size = 6 + name_len + data_len
+    if len(payload) != expected_size:
+        raise PacketDecodeError(
+            f"SPRITE_CHUNK payload length mismatch: expected {expected_size} bytes, "
+            f"got {len(payload)}"
+        )
+    name = _decode_text(payload[6:6 + name_len], "SPRITE_CHUNK", "sprite name")
     data_start = 6 + name_len
     data = payload[data_start:data_start + data_len]
     return {
