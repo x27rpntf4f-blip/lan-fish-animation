@@ -130,6 +130,25 @@ def test_wheel_console_loads_all_runtime_modules_without_editable_source(tmp_pat
     )
     assert import_result.returncode == 0, import_result.stderr
 
+    audio_probe = _run(
+        [
+            str(python),
+            "-c",
+            (
+                "from audio_manager import AudioManager; "
+                "audio = AudioManager(); "
+                "assert audio.enabled; "
+                "audio.play(); "
+                "assert audio.channel is not None; "
+                "audio.stop(); print('audio-enabled')"
+            ),
+        ],
+        cwd=tmp_path,
+        env=clean_env,
+    )
+    assert audio_probe.returncode == 0, audio_probe.stderr
+    assert audio_probe.stdout.splitlines()[-1] == "audio-enabled"
+
     no_source_cwd = tmp_path / "empty-cwd"
     no_source_cwd.mkdir()
     runtime = _run(
@@ -140,7 +159,6 @@ def test_wheel_console_loads_all_runtime_modules_without_editable_source(tmp_pat
             "--run-seconds",
             "0.2",
             "--windowed",
-            "--no-audio",
         ],
         cwd=no_source_cwd,
         env=clean_env,
@@ -148,4 +166,5 @@ def test_wheel_console_loads_all_runtime_modules_without_editable_source(tmp_pat
 
     assert runtime.returncode == 0, runtime.stderr
     assert "sprite_count=10" in runtime.stderr
+    assert "audio_enabled=True" in runtime.stderr
     assert _tree_digest(site_packages) == installed_digest

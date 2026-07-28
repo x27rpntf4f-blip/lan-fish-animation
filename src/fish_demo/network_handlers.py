@@ -89,6 +89,19 @@ class SpriteSendWorker:
             if self._stop.is_set():
                 return
             raw = read_regular_sprite_file(root, name, filename)
+            if len(raw) > msg.MAX_SPRITE_FRAME_BYTES:
+                logger.warning(
+                    "Rejected oversized sprite frame",
+                    extra={
+                        "event": "sprite_send_rejected",
+                        "sprite_name": name,
+                        "frame_index": frame_index,
+                        "frame_bytes": len(raw),
+                        "max_frame_bytes": msg.MAX_SPRITE_FRAME_BYTES,
+                        "peer": f"{job.target_ip}:{job.target_port}",
+                    },
+                )
+                return
             total = max(1, (len(raw) + CHUNK_SIZE - 1) // CHUNK_SIZE)
             for chunk_index in range(total):
                 if self._stop.is_set():

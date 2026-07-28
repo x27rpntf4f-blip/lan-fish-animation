@@ -21,13 +21,13 @@ import io
 import logging
 import os
 import re
-import shutil
 import stat
 import sys
 from pathlib import Path
 
 import pygame
 
+import message
 from fishmesh.sprite_names import (
     InvalidSpriteName,
     atomic_replace_sprite_file,
@@ -38,6 +38,15 @@ from fishmesh.sprite_names import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def validate_sprite_frame_bytes(frame_data: bytes) -> bytes:
+    """Reject frames that cannot be represented by the V1 chunk protocol."""
+    if len(frame_data) > message.MAX_SPRITE_FRAME_BYTES:
+        raise InvalidSpriteName(
+            f"sprite frame exceeds V1 limit of {message.MAX_SPRITE_FRAME_BYTES} bytes"
+        )
+    return frame_data
 
 
 def _default_user_sprite_dir() -> Path:
@@ -292,8 +301,6 @@ class SpriteManager:
                 },
             )
             return False
-        os.makedirs(dest, exist_ok=True)
-
         png_files = sorted(f for f in os.listdir(source_folder) if f.lower().endswith(".png"))
         if not png_files:
             logger.warning(
@@ -307,26 +314,16 @@ class SpriteManager:
             )
             return False
 
+        prepared_frames: list[bytes] = []
         for i, fname in enumerate(png_files, start=1):
             src = os.path.join(source_folder, fname)
-            new_name = f"Fish-{i}.png"
-
-            # 读取 → 缩放 → 居中到透明画布 → 落盘。
-            # 保留 alpha 通道（convert_alpha），避免黑底。
-            def _write_frame(
-                temporary_stream,
-                source=src,
-                source_name=fname,
-                import_index=i - 1,
-                sprite_name=display_name,
-            ):
-                try:
-                    img = pygame.image.load(source).convert_alpha()
-                    w, h = img.get_width(), img.get_height()
-                    if w <= 0 or h <= 0:
-                        with open(source, "rb") as source_stream:
-                            shutil.copyfileobj(source_stream, temporary_stream)
-                        return
+            try:
+                img = pygame.image.load(src).convert_alpha()
+                w, h = img.get_width(), img.get_height()
+                if w <= 0 or h <= 0:
+                    with open(src, "rb") as source_stream:
+                        frame_data = source_stream.read()
+                else:
                     scale = 256.0 / max(w, h)
                     new_w = max(1, round(w * scale))
                     new_h = max(1, round(h * scale))
@@ -337,20 +334,28 @@ class SpriteManager:
                     canvas.blit(scaled, (ox, oy))
                     encoded = io.BytesIO()
                     pygame.image.save(canvas, encoded, ".png")
-                    temporary_stream.write(encoded.getvalue())
-                except pygame.error as exc:
-                    logger.warning(
-                        "Copied sprite frame without normalization",
-                        extra={
-                            "event": "sprite_frame_import_failed",
-                            "sprite_name": sprite_name,
-                            "frame_index": import_index,
-                            "file_name": source_name,
-                            "error": str(exc),
-                        },
-                    )
-                    with open(source, "rb") as source_stream:
-                        shutil.copyfileobj(source_stream, temporary_stream)
+                    frame_data = encoded.getvalue()
+            except pygame.error as exc:
+                logger.warning(
+                    "Copied sprite frame without normalization",
+                    extra={
+                        "event": "sprite_frame_import_failed",
+                        "sprite_name": display_name,
+                        "frame_index": i - 1,
+                        "file_name": fname,
+                        "error": str(exc),
+                    },
+                )
+                with open(src, "rb") as source_stream:
+                    frame_data = source_stream.read()
+            prepared_frames.append(validate_sprite_frame_bytes(frame_data))
+
+        os.makedirs(dest, exist_ok=True)
+        for i, frame_data in enumerate(prepared_frames, start=1):
+            new_name = f"Fish-{i}.png"
+
+            def _write_frame(temporary_stream, data=frame_data):
+                temporary_stream.write(data)
 
             atomic_replace_sprite_file(self.SPRITE_DIR, display_name, new_name, _write_frame)
 

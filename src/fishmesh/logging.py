@@ -14,7 +14,14 @@ _RESERVED_RECORD_KEYS = frozenset(
     logging.makeLogRecord({}).__dict__.keys() | {"asctime", "message"}
 )
 _MAX_JSON_DEPTH = 8
-_PROJECT_LOGGER_NAMES = ("fishmesh", "fish_demo", "network", "sprite_manager", "sprite_sync")
+_PROJECT_LOGGER_NAMES = (
+    "fishmesh",
+    "fish_demo",
+    "network",
+    "audio_manager",
+    "sprite_manager",
+    "sprite_sync",
+)
 
 
 def _extras(record: logging.LogRecord) -> dict[str, Any]:
