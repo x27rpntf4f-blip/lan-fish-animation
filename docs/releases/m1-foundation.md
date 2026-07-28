@@ -4,12 +4,11 @@
 
 - Verification date: 2026-07-28 (Asia/Shanghai).
 - Branch: `codex/fishmesh-m0-m1`.
-- Code commit under verification: `b22257c9c196f6ef185b2367eee3d2aa84be9169`.
-- Base commit: `603f7d31c795bac58740765b041c6bacc26f8659` (`main`).
-- This release record is a documentation-only descendant of the verified code
-  commit. The `m1-foundation` tag candidate must point to the final branch HEAD
-  that includes this record, not to the older code SHA. No Git tag was created
-  by this verification.
+- Code commit under verification: `7de22d9ec302e123af3d416b49305aaf5f839f61`.
+- Final-hardening base: `d4c92f4f95f1811740af0c442e94c3dfee002153`.
+- Original project base: `603f7d31c795bac58740765b041c6bacc26f8659` (`main`).
+- This release record is a documentation-only descendant of the code commit.
+- No Git tag was created. Remote CI and real three-device evidence remain pending.
 
 ## Local environment
 
@@ -17,131 +16,114 @@
 | --- | --- |
 | Operating system | macOS 26.5.2, build 25F84, arm64 |
 | Python | 3.12.13, Clang 17.0.0 (`clang-1700.6.3.2`) |
-| Virtual environment interpreter | `.venv/bin/python3` in the isolated worktree |
 | uv | 0.11.28 (Homebrew 2026-07-07, aarch64-apple-darwin) |
 | pygame / SDL | pygame 2.6.1 / SDL 2.28.4 |
 | Ruff | 0.16.0 |
 | ty | 0.0.63 (`46f4915e6`, 2026-07-23) |
 | pytest / pytest-cov | 8.4.2 / 6.3.0 |
-| Git | 2.50.1 (Apple Git-155) |
 
-All Python verification commands used `PYTHONDONTWRITEBYTECODE=1`. The
-`compileall` command additionally placed its cache under `/private/tmp`, so
-verification did not write bytecode into the source tree.
+Python verification used `PYTHONDONTWRITEBYTECODE=1`. `compileall` used an
+external `PYTHONPYCACHEPREFIX`. Runtime probes used isolated
+`FISHMESH_DATA_DIR` directories, so neither source assets nor package resources
+were writable runtime targets.
+
+## Strict TDD evidence
+
+Each behavior change was observed failing before its implementation.
+
+| Area | RED command and observed result | GREEN command and observed result |
+| --- | --- | --- |
+| TRANSFER, HELLO, SPRITE_CHUNK | `uv run pytest tests/test_message_validation.py tests/test_sprite_names.py -q` -> 33 failed, 93 passed | Same command -> 126 passed |
+| Network handoff and bind cleanup | `uv run pytest tests/test_network_concurrency.py -q` -> 5 failed | `uv run pytest tests/test_network_concurrency.py tests/test_logging.py -q` -> 22 passed |
+| Legacy migration | focused `tests/test_sprite_names.py` selection -> 4 failed | full `tests/test_sprite_names.py -q` -> 81 passed after symlink/reparse coverage |
+| Bounded sprite worker lifecycle | `uv run pytest tests/test_sprite_worker.py tests/test_runtime_lifecycle.py -q` -> 5 failed, 4 passed | Same command -> 9 passed; combined worker/lifecycle/sprite regression -> 90 passed |
+| Installed wheel resources | `uv run pytest tests/test_wheel_install.py -q` -> 1 failed because the installed runtime did not report 10 sprite types | Same command -> 1 passed with a no-source-CWD bounded runtime and unchanged install digest |
+
+The initial full-suite attempt exposed one test-isolation issue: the runtime
+rate limiter suppressed a repeated log record. The malicious TRANSFER was
+already discarded and the following GOODBYE was processed. The test now owns a
+fresh limiter and logger handler; the fresh full gate passes all 200 tests.
 
 ## Quality gate results
 
-The following commands were run serially from a clean isolated worktree.
+| Command | Result |
+| --- | --- |
+| `uv run ruff check src/fishmesh src/fish_demo tests scripts` | Exit 0; `All checks passed!` (0.10 s) |
+| `uv run ty check src/fishmesh src/fish_demo` | Exit 0; `All checks passed!` (0.08 s) |
+| `uv run pytest --cov=src --cov-report=term-missing` | Exit 0; 200 passed in 23.61 s; 61% whole-`src` coverage (2,667 statements, 1,050 missed) |
+| `PYTHONPYCACHEPREFIX=/private/tmp/fishmesh-final-pycache-20260728 uv run python -m compileall -q src` | Exit 0; no output (0.11 s) |
+| `uv run pytest tests/test_wheel_install.py -q` | Exit 0; 1 passed in 17.67 s |
+| `git diff --check` | Exit 0; no output (0.01 s) |
 
-| Command | Result | Observed duration |
-| --- | --- | ---: |
-| `uv run ruff check src/fishmesh src/fish_demo tests scripts` | Exit 0; `All checks passed!` | 6.1 s |
-| `uv run ty check src/fishmesh src/fish_demo` | Exit 0; `All checks passed!` | 4.5 s |
-| `uv run pytest --cov=src --cov-report=term-missing` | Exit 0; 151 passed; 55% whole-`src` coverage (2,409 statements, 1,086 missed) | 18.81 s reported by pytest |
-| `PYTHONPYCACHEPREFIX=/private/tmp/fishmesh-task11-pycache-20260728T1640 uv run python -m compileall -q src` | Exit 0; no output | 5.7 s |
-| `git diff --check` | Exit 0; no output | 0.1 s |
-| `uv run pytest tests/test_wheel_install.py -v` | Exit 0; isolated wheel build, install, console load, and runtime-module imports passed (1 test) | 12.96 s reported by pytest |
+The wheel test copies only the build inputs into a temporary source tree,
+builds and installs without editable-source access, starts `fishmesh-demo` for
+0.2 seconds from an empty working directory, asserts 10 sprite types load, and
+compares the complete site-packages content digest before and after runtime.
 
-The wheel test builds from a temporary source tree, installs without editable
-source access, clears project import paths, and exercises the installed
-`fishmesh-demo` console entry point.
+## Runtime entry-point and side-effect probes
 
-## Runtime entry-point checks
-
-Both supported entry points were run separately with SDL dummy video and
-audio drivers:
+Both entry points were run separately for one second with SDL dummy drivers,
+different UDP ports, and isolated writable data roots:
 
 ```sh
-SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONDONTWRITEBYTECODE=1 \
-  uv run python src/main.py \
-  --expected-hosts 1 --run-seconds 1 --windowed --no-audio
+uv run python src/main.py --port 6400 --expected-hosts 1 \
+  --run-seconds 1 --windowed --no-audio
 
-SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy PYTHONDONTWRITEBYTECODE=1 \
-  uv run python -m fish_demo \
-  --expected-hosts 1 --run-seconds 1 --windowed --no-audio
+uv run python -m fish_demo --port 6410 --expected-hosts 1 \
+  --run-seconds 1 --windowed --no-audio
 ```
 
-Each command exited 0, loaded 10 sprite types, reached `Mesh target: 1 hosts`,
-and shut down after the bounded run. The SDL dummy driver did not create a
-display-backed visible window. UDP ports 6000-6009 were unbound before and
-after the runs.
+Both exited 0 and logged `sprite_count=10`. The combined tracked configuration,
+source sprite, and package-resource digest was
+`93eb41114dcc72c35db0ca411444fd2c1d76480b5e46e9de9a2b0a05cbb67c27`
+before and after. `git status --short` was empty before and after.
 
-The following side-effect checks also matched before and after both entry
-points:
+## Hardened behavior
 
-- `config.ini` and `config.example.ini` SHA-256:
-  `6fb2a9dab242f2d0f19c0423c274deb09939074afafb0cf2bb5e42aaf88d239d`;
-- canonical sprite file-inventory SHA-256:
-  `757bd739dc08c9429d08aa9d9137590f5165373744561278554ce09f7219f228`;
-- exactly 10 canonical sprite type directories remained;
-- the obsolete `assets/fish_sprites/Free Fish Icons` sentinel was not created;
-- `git status --short` remained empty.
-
-## Verification hygiene correction
-
-The first release-gate attempt exposed two deterministic repository side
-effects. Thirteen generated `.pyc` files were tracked and ordinary imports
-rewrote three of them. Legacy sprite migration also copied 18 additional
-frames into an already-populated canonical sprite tree.
-
-Commit `ffb21ef` removes all tracked bytecode and adds a repository contract
-that rejects tracked `.pyc`/`__pycache__` paths. The 18 generated frames were
-individually verified as untracked byte-for-byte copies of the retained legacy
-source assets before being removed.
-
-Review then found that the initial migration completion check was too broad.
-Commit `b22257c` derives the actual target types from legal legacy filenames,
-skips migration only when every legacy target type already has a canonical
-frame, fills only missing target files, never overwrites existing canonical
-files, and no longer creates or trusts an empty migration sentinel. It also
-anchors the bytecode contract to the repository root and parses
-`git ls-files -z`, so the contract remains correct from another current
-directory.
-
-The custom-only, partial-target, empty-sentinel, no-sentinel, idempotence, and
-cross-working-directory contracts were observed failing before their fixes and
-passing afterward. The complete release gate above was rerun from the
-beginning at `b22257c`.
+- Every TRANSFER float (`x`, `y`, `direction`, `speed`, `size`) must be finite
+  and within an explicit V1 range. Malicious values are discarded at decode,
+  so `math.cos(inf)` cannot terminate message handling.
+- HELLO hostnames now truncate only at a valid UTF-8 boundary.
+- SPRITE_CHUNK requires 1-224 chunks, an in-range index, and at most 460 data
+  bytes per chunk. Conflicting totals clear the pending frame.
+- Network worker handoff captures immutable endpoint tuples under registry
+  locking. Membership mutation and per-peer send errors cannot terminate the
+  only listener thread. Constructor failure closes the UDP socket.
+- Legacy migration rejects symlink/reparse roots and target directories,
+  rejects source links or replacement races, and uses descriptor-bound,
+  no-overwrite atomic creation. Repeated runs are idempotent.
+- Sprite requests use one runtime-owned non-daemon worker with an eight-job
+  queue. Duplicate peer/name jobs coalesce; overload is rejected. Enumeration,
+  reads, chunking, and sends all occur off the render thread. Shutdown stops and
+  joins this worker before closing the network socket.
+- The wheel carries ten package-owned, read-only default sprite frames (about
+  547 KB). Imports, synchronization, and migration target platform user data or
+  an explicit `FISHMESH_DATA_DIR`, never site-packages.
 
 ## Repository scope
 
-At code commit `b22257c`, compared with the merge base on `main`, M0-M1 changes
-55 planned paths with 5,456 insertions and 831 deletions. The deletions include
-the 13 generated bytecode artifacts. The isolated worktree was clean after
-verification. A read-only check of the original checkout confirmed its
-pre-existing modified and deleted files were unchanged by this worktree.
+The hardening range `d4c92f4..7de22d9` changes 25 files with 1,288 insertions
+and 147 deletions. The complete M0-M1 range from the original `main` base changes
+68 files with 6,682 insertions and 902 deletions. The isolated worktree was
+clean at the code commit.
 
 ## Known limitations and pending evidence
 
-- V1 has no authentication, encryption, ACK/retry/deduplication envelope, or
-  end-to-end reliable resource transfer. Its sprite format has no complete
-  multi-frame manifest.
-- Discovery remains single-subnet IPv4 broadcast. Host IDs remain dependent on
-  topology ordering, and M1 topology remains one-dimensional.
-- Fish-transfer control packets still use the render-loop UDP send path; M1
-  moved heartbeat and sprite payload work off that path.
-- Whole-`src` coverage is measured but has no `fail-under` threshold. Legacy
-  pygame presentation modules remain the largest uncovered area.
-- The GitHub Actions 3 OS x 3 Python matrix is declared but still requires a
-  successful remote run. This local verification does not claim native Linux
-  or Windows execution.
+- V1 still has no authentication, encryption, ACK/retry/deduplication envelope,
+  or complete multi-frame manifest. The bounded queue limits unauthenticated
+  request cost but does not authenticate requesters.
+- Discovery remains single-subnet IPv4 broadcast. Host IDs remain topology
+  order dependent and topology remains one-dimensional.
+- Whole-`src` coverage is measured but has no `fail-under` threshold. Pygame
+  presentation modules remain the largest uncovered area.
+- The GitHub Actions 3 OS x 3 Python matrix is declared but still needs a
+  successful remote run. This local record does not claim native Linux or
+  Windows execution.
 - A real three-device LAN demonstration, including firewall and broadcast
   behavior, remains pending.
 
-## Next approved plan boundary
+## Next plan boundary
 
-M1 intentionally defers protocol V2, SWIM-inspired membership,
-two-dimensional topology, the experiment simulator, and the monitoring
-dashboard. Subsequent work must remain in separately approved plans:
-
-1. **M2 Protocol V2:** versioned envelope, stable UUID/session identity,
-   ACK/retry/deduplication, reliable resource transfer, bounded queues, and a
-   V1 compatibility adapter.
-2. **M3 Cluster Runtime:** SWIM-inspired membership, two-dimensional layout,
-   migration ownership state machine, rollback, and convergence tests.
-3. **M4 Experiment Platform:** multi-process orchestration, deterministic fault
-   injection, metrics, simulator/dashboard views, and JSON/CSV reports.
-4. **M5 Portfolio Release:** installers, real three-device lab protocol,
-   demonstration video, public documentation, and release packaging.
-5. **M6+ Research Extensions:** one separately approved experimental question
-   per plan.
+M1 intentionally does not implement protocol V2, SWIM-inspired membership,
+two-dimensional topology, the simulator, or the dashboard. Those remain in the
+separately approved M2-M5 plans.

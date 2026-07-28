@@ -1,7 +1,9 @@
 # FishMesh M0 legacy baseline
 
 This document freezes observed V1 behavior before M1 defensive changes. It is a
-baseline record, not a statement that the listed behaviors are acceptable.
+baseline record, not a statement that the listed behaviors are acceptable. The
+measurements were taken from code commit `c9a04771058585300e0c470de7507031cdec7842`
+and recorded by baseline commit `9f690d2de23560047b20fb61887770c7ac125ea8`.
 
 ## Capture command and environment
 
@@ -45,9 +47,11 @@ SPRITE_CHUNK round trips.
 | Network sends on the render thread | Incoming message handling is called by the main loop and directly calls `net.send`/`net.broadcast`; transfers also send directly. | `src/main.py:58-69`, `src/main.py:512-521`, `src/main.py:166-181` | Move sprite and control sends behind a worker/queue without changing visible behavior. |
 | Tracked personal path | The tracked background config contains a machine-specific Windows OneDrive path: `C:/Users/Athur/OneDrive/ͼƬ/OIP-C.png`. | `config.ini:20-22`; capture field `tracked_personal_paths` | Replace it with portable example configuration during M1. |
 
-## M1 Result
+## Historical M1 result
 
-Measured on 2026-07-27 with Python 3.12.13 (Clang 17.0.0), uv 0.11.28,
+This section preserves the result as it stood at `5827fc947e720e956d00d0551f5d4cc6f7e0c8f4`;
+it is not the current branch result. Measured on 2026-07-27 with Python 3.12.13
+(Clang 17.0.0), uv 0.11.28,
 and macOS 26.5.2 build 25F84 on arm64. The complete command
 `uv run pytest --cov=src --cov-report=term-missing` collected and passed 145
 tests. Coverage was 55% (2,396 statements, 1,085 missed). This is the measured
@@ -92,3 +96,12 @@ denominator, and M1 does not define or enforce a coverage threshold.
 - The 3 x 3 CI matrix is a declaration until GitHub Actions reports successful
   jobs. This local run does not claim native Windows/Linux or a real three-host
   LAN verification.
+
+## Final hardening result
+
+The 2026-07-28 hardening code snapshot is
+`7de22d9ec302e123af3d416b49305aaf5f839f61`. Its fresh local gate collected and
+passed 200 tests. Whole-`src` coverage is 61% (2,667 statements, 1,050 missed).
+This supersedes the historical test and coverage totals above without rewriting
+the earlier evidence. Remote 3 OS x 3 Python CI and a real three-machine LAN run
+remain pending.
