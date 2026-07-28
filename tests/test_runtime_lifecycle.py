@@ -246,3 +246,22 @@ def test_discovery_exception_cleans_every_created_runtime_resource(
     assert pygame.quit_called is True
     assert pygame.display.get_init() is False
     assert pygame.mixer.get_init() is False
+
+
+def test_runtime_stops_sprite_worker_before_network_shutdown() -> None:
+    order: list[str] = []
+    resources = main.RuntimeResources()
+    resources.sprite_sender = type(
+        "SpriteSender",
+        (),
+        {"stop": lambda _self: order.append("sprite-stop")},
+    )()
+    resources.network = type(
+        "Network",
+        (),
+        {"shutdown": lambda _self: order.append("network-shutdown")},
+    )()
+
+    resources.close()
+
+    assert order == ["sprite-stop", "network-shutdown"]

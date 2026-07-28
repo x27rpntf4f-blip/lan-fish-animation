@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -35,6 +36,16 @@ def _run(command: list[str], *, cwd: Path, env: dict[str, str]) -> subprocess.Co
     )
 
 
+def _tree_digest(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix().encode()
+        digest.update(relative)
+        if path.is_file() and not path.is_symlink():
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
 def test_wheel_console_loads_all_runtime_modules_without_editable_source(tmp_path: Path) -> None:
     """Would fail when the wheel omits any module imported by the demo application."""
     source_root = Path(__file__).resolve().parents[1]
@@ -52,6 +63,7 @@ def test_wheel_console_loads_all_runtime_modules_without_editable_source(tmp_pat
             "PYTHONNOUSERSITE": "1",
             "SDL_AUDIODRIVER": "dummy",
             "SDL_VIDEODRIVER": "dummy",
+            "FISHMESH_DATA_DIR": str(tmp_path / "user-data"),
         }
     )
 
@@ -102,6 +114,7 @@ def test_wheel_console_loads_all_runtime_modules_without_editable_source(tmp_pat
     assert site_packages_result.returncode == 0, site_packages_result.stderr
     site_packages = Path(site_packages_result.stdout.strip())
     shutil.copytree(Path(pygame.__file__).parent, site_packages / "pygame")
+    installed_digest = _tree_digest(site_packages)
 
     scripts = environment / ("Scripts" if os.name == "nt" else "bin")
     console = scripts / ("fishmesh-demo.exe" if os.name == "nt" else "fishmesh-demo")
@@ -116,3 +129,23 @@ def test_wheel_console_loads_all_runtime_modules_without_editable_source(tmp_pat
         env=clean_env,
     )
     assert import_result.returncode == 0, import_result.stderr
+
+    no_source_cwd = tmp_path / "empty-cwd"
+    no_source_cwd.mkdir()
+    runtime = _run(
+        [
+            str(console),
+            "--expected-hosts",
+            "1",
+            "--run-seconds",
+            "0.2",
+            "--windowed",
+            "--no-audio",
+        ],
+        cwd=no_source_cwd,
+        env=clean_env,
+    )
+
+    assert runtime.returncode == 0, runtime.stderr
+    assert "sprite_count=10" in runtime.stderr
+    assert _tree_digest(site_packages) == installed_digest

@@ -3,7 +3,10 @@ from __future__ import annotations
 import logging
 import math
 import os
+import queue
 import threading
+from dataclasses import dataclass
+from pathlib import Path
 
 import message as msg
 from fish_entity import Fish
@@ -24,36 +27,124 @@ logger = logging.getLogger(__name__)
 # ── sprite data sender ────────────────────────────────────
 
 
-def send_sprite_data_async(sprite_mgr, net, target_ip, target_port, sender_id, sprite_name):
-    """Send all PNG frames in a background thread so the main loop
-    is not blocked by large UDP transfers."""
-    # snapshot the net ref & data so the thread doesn't touch runtime state
-    _net = net
-    _ip = target_ip
-    _port = target_port
-    _sid = sender_id
-    _name, folder = resolve_sprite_directory(sprite_mgr.SPRITE_DIR, sprite_name)
-    # Read raw PNG bytes from disk — sprite_mgr.frames stores
-    # Surfaces which cannot be sliced for network chunks.
-    frames = []
-    if os.path.isdir(folder):
-        for fname in sorted(os.listdir(folder)):
-            if fname.lower().startswith("fish-") and fname.lower().endswith(".png"):
-                frames.append(read_regular_sprite_file(sprite_mgr.SPRITE_DIR, _name, fname))
-    if not frames:
-        return
+@dataclass(frozen=True)
+class SpriteSendJob:
+    target_ip: str
+    target_port: int
+    sender_id: int
+    sprite_name: str
 
-    def _worker():
-        for fi, raw in enumerate(frames):
+
+class SpriteSendWorker:
+    """Runtime-owned single worker for bounded, coalesced V1 resource sends."""
+
+    def __init__(self, sprite_root: str | Path | list[str | Path], net, *, max_pending: int = 8):
+        if max_pending < 1:
+            raise ValueError("max_pending must be positive")
+        roots = sprite_root if isinstance(sprite_root, list) else [sprite_root]
+        self._sprite_roots = tuple(Path(root) for root in roots)
+        self._net = net
+        self._jobs: queue.Queue[SpriteSendJob] = queue.Queue(maxsize=max_pending)
+        self._pending: set[SpriteSendJob] = set()
+        self._pending_lock = threading.Lock()
+        self._stop = threading.Event()
+        self.thread = threading.Thread(
+            target=self._run,
+            name="fishmesh-sprite-sender",
+            daemon=False,
+        )
+        self.thread.start()
+
+    def submit(self, target_ip: str, target_port: int, sender_id: int, sprite_name: str) -> bool:
+        name = validate_sprite_name(sprite_name)
+        job = SpriteSendJob(target_ip, target_port, sender_id, name)
+        with self._pending_lock:
+            if self._stop.is_set():
+                return False
+            if job in self._pending:
+                return True
+            try:
+                self._jobs.put_nowait(job)
+            except queue.Full:
+                return False
+            self._pending.add(job)
+        return True
+
+    def _send(self, job: SpriteSendJob) -> None:
+        selected = None
+        for root in self._sprite_roots:
+            name, folder = resolve_sprite_directory(root, job.sprite_name)
+            if os.path.isdir(folder):
+                selected = (root, name, folder)
+                break
+        if selected is None:
+            return
+        root, name, folder = selected
+        frame_names = [
+            filename
+            for filename in sorted(os.listdir(folder))
+            if filename.lower().startswith("fish-") and filename.lower().endswith(".png")
+        ]
+        for frame_index, filename in enumerate(frame_names):
+            if self._stop.is_set():
+                return
+            raw = read_regular_sprite_file(root, name, filename)
             total = max(1, (len(raw) + CHUNK_SIZE - 1) // CHUNK_SIZE)
-            for ci in range(total):
-                start = ci * CHUNK_SIZE
-                chunk_data = raw[start : start + CHUNK_SIZE]
-                pkt = msg.pack_sprite_chunk(_sid, _name, fi, total, ci, chunk_data)
-                _net.send(_ip, _port, pkt)
+            for chunk_index in range(total):
+                if self._stop.is_set():
+                    return
+                start = chunk_index * CHUNK_SIZE
+                packet = msg.pack_sprite_chunk(
+                    job.sender_id,
+                    name,
+                    frame_index,
+                    total,
+                    chunk_index,
+                    raw[start : start + CHUNK_SIZE],
+                )
+                self._net.send(job.target_ip, job.target_port, packet)
 
-    t = threading.Thread(target=_worker, daemon=True)
-    t.start()
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                job = self._jobs.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            try:
+                if not self._stop.is_set():
+                    self._send(job)
+            except Exception as exc:
+                logger.warning(
+                    "Sprite send job failed",
+                    extra={
+                        "event": "sprite_send_failed",
+                        "sprite_name": job.sprite_name,
+                        "peer": f"{job.target_ip}:{job.target_port}",
+                        "error": str(exc),
+                    },
+                )
+            finally:
+                with self._pending_lock:
+                    self._pending.discard(job)
+                self._jobs.task_done()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if threading.current_thread() is not self.thread:
+            self.thread.join()
+
+
+def send_sprite_data_async(
+    sprite_mgr,
+    sprite_sender,
+    target_ip,
+    target_port,
+    sender_id,
+    sprite_name,
+):
+    """Compatibility wrapper that only enqueues on the runtime-owned sender."""
+    validate_sprite_name(sprite_name)
+    return sprite_sender.submit(target_ip, target_port, sender_id, sprite_name)
 
 
 # ── network message handler (extended) ────────────────────
@@ -75,7 +166,17 @@ def _request_missing_sprites(
 
 
 def handle_network_message(
-    data, addr, net, reg, fishes, screen_w, screen_h, sprite_mgr, sync_mgr, request_tracker=None
+    data,
+    addr,
+    net,
+    reg,
+    fishes,
+    screen_w,
+    screen_h,
+    sprite_mgr,
+    sync_mgr,
+    request_tracker=None,
+    sprite_sender=None,
 ):
     sender_ip = addr[0]
 
@@ -227,9 +328,18 @@ def handle_network_message(
 
     elif mtype == msg.MSG_SPRITE_REQ:
         name = decoded
-        if name and name in sprite_mgr.get_types():
+        if name and name in sprite_mgr.get_types() and sprite_sender is not None:
             try:
-                send_sprite_data_async(sprite_mgr, net, sender_ip, addr[1], reg.my_id, name)
+                accepted = sprite_sender.submit(sender_ip, addr[1], reg.my_id, name)
+                if not accepted:
+                    logger.warning(
+                        "Rejected sprite request because the send queue is full or stopping",
+                        extra={
+                            "event": "sprite_request_rejected",
+                            "sprite_name": name,
+                            "peer": f"{sender_ip}:{addr[1]}",
+                        },
+                    )
             except InvalidSpriteName as exc:
                 logger.warning(
                     "Discarding unsafe sprite request",

@@ -5,6 +5,8 @@ import queue
 import sys
 import time
 from collections.abc import Sequence
+from pathlib import Path
+from typing import cast
 
 import pygame
 
@@ -14,7 +16,7 @@ from background_manager import BackgroundManager
 from config import load, save
 from fish_demo.cli import parse_args
 from fish_demo.input_handlers import _toggle_fullscreen, handle_key, spawn_fish
-from fish_demo.network_handlers import handle_network_message
+from fish_demo.network_handlers import SpriteSendWorker, handle_network_message
 from fish_entity import Fish
 from fishmesh.logging import configure_logging
 from fishmesh.request_tracker import RequestTracker
@@ -71,6 +73,7 @@ class RuntimeResources:
         self.audio = None
         self.background = None
         self.network = None
+        self.sprite_sender = None
         self.closed = False
 
     @staticmethod
@@ -95,6 +98,8 @@ class RuntimeResources:
             self._ignore_cleanup_error(self.background.cleanup)
         if self.audio is not None:
             self._ignore_cleanup_error(self.audio.stop)
+        if self.sprite_sender is not None:
+            self._ignore_cleanup_error(self.sprite_sender.stop)
         if self.network is not None:
             self._ignore_cleanup_error(self.network.shutdown)
         if self.pygame_initialized:
@@ -208,6 +213,12 @@ def _main(args, cfg, resources):
     start_port = args.port if args.port is not None else int(cfg["Network"]["port"])
     net = NetworkManager(start_port)
     resources.network = net
+    if hasattr(sprite_mgr, "get_sprite_send_roots"):
+        sprite_roots = cast(list[str | Path], sprite_mgr.get_sprite_send_roots())
+    else:
+        sprite_roots = [cast(str | Path, sprite_mgr.SPRITE_DIR)]
+    sprite_sender = SpriteSendWorker(sprite_roots, net)
+    resources.sprite_sender = sprite_sender
     reg = HostRegistry(net.port)
     msg_queue = queue.Queue()
     net.start_listen(msg_queue)
@@ -224,7 +235,17 @@ def _main(args, cfg, resources):
             if addr[0] == reg.my_ip and addr[1] == net.port:
                 continue
             handle_network_message(
-                data, addr, net, reg, [], W, H, sprite_mgr, sync_mgr, request_tracker
+                data,
+                addr,
+                net,
+                reg,
+                [],
+                W,
+                H,
+                sprite_mgr,
+                sync_mgr,
+                request_tracker,
+                sprite_sender,
             )
         except queue.Empty:
             time.sleep(0.05)
@@ -343,7 +364,17 @@ def _main(args, cfg, resources):
             if addr[0] == reg.my_ip and addr[1] == net.port:
                 continue
             handle_network_message(
-                data, addr, net, reg, fishes, W, H, sprite_mgr, sync_mgr, request_tracker
+                data,
+                addr,
+                net,
+                reg,
+                fishes,
+                W,
+                H,
+                sprite_mgr,
+                sync_mgr,
+                request_tracker,
+                sprite_sender,
             )
 
         if paused:

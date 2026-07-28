@@ -16,12 +16,15 @@ SpriteManager —— 鱼精灵的加载、缓存、翻转与导入。
 渲染时根据 `fish.turn_state` 二选一，避免运行时 transform。
 """
 
+import importlib.resources
 import io
 import logging
 import os
 import re
 import shutil
 import stat
+import sys
+from pathlib import Path
 
 import pygame
 
@@ -37,6 +40,19 @@ from fishmesh.sprite_names import (
 logger = logging.getLogger(__name__)
 
 
+def _default_user_sprite_dir() -> Path:
+    override = os.environ.get("FISHMESH_DATA_DIR")
+    if override:
+        return Path(override).expanduser() / "fish_sprites"
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+        return base / "FishMesh" / "fish_sprites"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "FishMesh" / "fish_sprites"
+    base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    return base / "fishmesh" / "fish_sprites"
+
+
 class SpriteManager:
     """
     精灵资源管理器。
@@ -49,11 +65,23 @@ class SpriteManager:
     5. **访问**   ：按 type+frame 索引取正向/翻转 Surface，含三层 fallback
     """
 
-    # 标准精灵目录（项目根/assets/fish_sprites）。
-    # 使用 os.path.dirname(__file__) 的上一级定位项目根，保证从任意 cwd 调用都能找对路径。
-    SPRITE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "fish_sprites")
+    PACKAGE_SPRITE_DIR = Path(
+        str(importlib.resources.files("fish_demo.resources").joinpath("fish_sprites"))
+    )
+    # Network sync, imports, and migration always target user-writable data.
+    SPRITE_DIR = _default_user_sprite_dir()
     # 老版本 Free Fish Icons 平铺目录：仅用于一次性迁移。
     OLD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "Free Fish Icons")
+
+    def get_sprite_roots(self):
+        """Return read roots in fallback-to-override order."""
+        if "SPRITE_DIR" in self.__dict__:
+            return [Path(self.SPRITE_DIR)]
+        return [self.PACKAGE_SPRITE_DIR, Path(self.SPRITE_DIR)]
+
+    def get_sprite_send_roots(self):
+        """Return writable overrides before bundled defaults for network reads."""
+        return list(reversed(self.get_sprite_roots()))
 
     def __init__(self):
         # type 字符串 -> 该 type 的所有帧 Surface 列表（顺序与文件名一致）
@@ -110,12 +138,18 @@ class SpriteManager:
         target_types = {target_type for _, target_type, _ in legacy_frames}
 
         def has_canonical_frame(target_type):
-            _, type_dir = resolve_sprite_directory(sprite_root, target_type)
-            return os.path.isdir(type_dir) and any(
-                re.fullmatch(r"Fish-\d+\.png", file_name, re.IGNORECASE)
-                and os.path.isfile(os.path.join(type_dir, file_name))
-                for file_name in os.listdir(type_dir)
-            )
+            roots = [sprite_root]
+            if "SPRITE_DIR" not in self.__dict__:
+                roots.append(self.PACKAGE_SPRITE_DIR)
+            for root in roots:
+                _, type_dir = resolve_sprite_directory(root, target_type)
+                if os.path.isdir(type_dir) and any(
+                    re.fullmatch(r"Fish-\d+\.png", file_name, re.IGNORECASE)
+                    and os.path.isfile(os.path.join(type_dir, file_name))
+                    for file_name in os.listdir(type_dir)
+                ):
+                    return True
+            return False
 
         if all(has_canonical_frame(target_type) for target_type in target_types):
             return
@@ -169,13 +203,17 @@ class SpriteManager:
         self.frames = {}
         self.flipped_frames = {}
 
-        if not os.path.isdir(self.SPRITE_DIR):
-            # 没有素材目录时也保证存在，避免后续 import 时炸
-            os.makedirs(self.SPRITE_DIR, exist_ok=True)
-            return
+        os.makedirs(self.SPRITE_DIR, exist_ok=True)
+        folders: dict[str, Path] = {}
+        for root in self.get_sprite_roots():
+            if not root.is_dir():
+                continue
+            for folder in sorted(os.listdir(root)):
+                folder_path = root / folder
+                if folder_path.is_dir():
+                    folders[folder] = folder_path
 
-        for folder in sorted(os.listdir(self.SPRITE_DIR)):
-            folder_path = os.path.join(self.SPRITE_DIR, folder)
+        for folder, folder_path in sorted(folders.items()):
             if not os.path.isdir(folder_path):
                 continue
 

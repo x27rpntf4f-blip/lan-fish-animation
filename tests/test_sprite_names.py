@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pytest
 import fishmesh.sprite_names as sprite_names_module
 import main
 import message
+from fish_demo.network_handlers import SpriteSendWorker
 from fishmesh.request_tracker import RequestTracker
 from fishmesh.sprite_names import InvalidSpriteName, validate_sprite_name
 from sprite_manager import SpriteManager
@@ -780,15 +782,16 @@ def test_sprite_data_sender_rejects_path_escape_before_reading(tmp_path: Path) -
         )
 
 
-def test_sprite_data_sender_rejects_frame_symlink_without_reading_target(tmp_path: Path) -> None:
+def test_sprite_data_sender_rejects_frame_symlink_without_reading_target(
+    tmp_path: Path,
+    caplog,
+) -> None:
     sprite_root = tmp_path / "sprites"
     sprite_dir = sprite_root / "Purple"
     outside = tmp_path / "secret.png"
     sprite_dir.mkdir(parents=True)
     outside.write_bytes(b"outside-secret")
     (sprite_dir / "Fish-1.png").symlink_to(outside)
-    sprite_manager = type("SpriteManagerDouble", (), {"SPRITE_DIR": str(sprite_root)})()
-
     class NetDouble:
         def __init__(self) -> None:
             self.sent: list[tuple[object, ...]] = []
@@ -797,11 +800,27 @@ def test_sprite_data_sender_rejects_frame_symlink_without_reading_target(tmp_pat
             self.sent.append(args)
 
     net = NetDouble()
-
-    with pytest.raises(InvalidSpriteName):
-        main._send_sprite_data_async(sprite_manager, net, "127.0.0.1", 6200, 1, "Purple")
+    worker = SpriteSendWorker(sprite_root, net, max_pending=1)
+    worker_logger = logging.getLogger("fish_demo.network_handlers")
+    original_propagate = worker_logger.propagate
+    worker_logger.addHandler(caplog.handler)
+    worker_logger.propagate = False
+    try:
+        with caplog.at_level(logging.WARNING):
+            assert worker.submit("127.0.0.1", 6200, 1, "Purple") is True
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline and not any(
+                getattr(record, "event", None) == "sprite_send_failed"
+                for record in caplog.records
+            ):
+                time.sleep(0.005)
+    finally:
+        worker.stop()
+        worker_logger.removeHandler(caplog.handler)
+        worker_logger.propagate = original_propagate
 
     assert net.sent == []
+    assert any(record.event == "sprite_send_failed" for record in caplog.records)
 
 
 def test_unsafe_remote_type_is_not_requested() -> None:
