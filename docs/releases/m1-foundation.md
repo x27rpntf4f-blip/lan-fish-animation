@@ -4,7 +4,7 @@
 
 - Verification date: 2026-07-28 (Asia/Shanghai).
 - Branch: `codex/fishmesh-m0-m1`.
-- Code commit under verification: `34fd60e3135c8904f71595188c27f2fdeb25e867`.
+- Code commit under verification: `65e0f620fd97bdd5caff150baff50bee1379ad80`.
 - Final-hardening base: `d4c92f4f95f1811740af0c442e94c3dfee002153`.
 - Original project base: `603f7d31c795bac58740765b041c6bacc26f8659` (`main`).
 - This release record is a documentation-only descendant of the code commit.
@@ -41,13 +41,14 @@ Each behavior change was observed failing before its implementation.
 | Installed wheel audio | `uv run pytest tests/test_wheel_install.py -q` -> 1 failed at `assert audio.enabled` in the installed environment | Same command -> 1 passed; packaged `water.wav` enabled playback under dummy SDL, default startup logged `audio_enabled=True`, and the install digest stayed unchanged |
 | V1 sprite frame ceiling | `uv run pytest tests/test_sprite_limits.py -q` -> 3 failed, 1 passed | Same command -> 4 passed with real normalized PNGs below and above 103,040 bytes plus worker recovery |
 | Closed logging stream | focused closed-file reconfiguration test -> 1 failed with `ValueError: I/O operation on closed file` | `tests/test_logging.py tests/test_runtime_lifecycle.py -q` -> 23 passed |
+| Advertised sprite availability | `uv run pytest tests/test_sprite_limits.py -q` -> 2 failed, 4 passed: oversized-only was advertised and a mixed job stopped before its legal frame | `tests/test_sprite_limits.py tests/test_sprite_worker.py tests/test_request_tracker.py -q` -> 13 passed; three heartbeat/ping retry rounds emitted no request for oversized-only, while mixed sent only its legal frame |
 
 An earlier full-suite attempt exposed a rate-limiter isolation issue; that test
 now owns a fresh limiter and logger handler. Adding the audio logger later also
 exposed a hard-coded test cleanup list: a handler retained a closed capture
 stream, producing 9 failed and 195 passed. A real closed-file regression first
 failed, then the reconfiguration recovery and shared logger list passed the
-focused gate. The fresh full gate passes all 205 tests.
+focused gate. The fresh full gate passes all 207 tests.
 
 ## Quality gate results
 
@@ -55,12 +56,12 @@ focused gate. The fresh full gate passes all 205 tests.
 | --- | --- |
 | `uv run ruff check src/fishmesh src/fish_demo tests scripts` | Exit 0; `All checks passed!` |
 | `uv run ty check src/fishmesh src/fish_demo` | Exit 0; `All checks passed!` |
-| `uv run pytest --cov=src --cov-report=term-missing` | Exit 0; 205 passed in 23.04 s; 61% whole-`src` coverage (2,685 statements, 1,034 missed) |
-| `PYTHONPYCACHEPREFIX=/private/tmp/fishmesh-final-pycache-20260728-34fd60e uv run python -m compileall -q src` | Exit 0; no output |
-| `uv run pytest tests/test_wheel_install.py -q` | Exit 0; 1 passed |
+| `uv run pytest --cov=src --cov-report=term-missing` | Exit 0; 207 passed in 27.20 s; 62% whole-`src` coverage (2,695 statements, 1,018 missed) |
+| `PYTHONPYCACHEPREFIX=/private/tmp/fishmesh-final-pycache-20260728-65e0f62 uv run python -m compileall -q src` | Exit 0; no output |
+| `uv run pytest tests/test_wheel_install.py -q` | Exit 0; 1 passed in 23.11 s |
 | `git diff --check` | Exit 0; no output |
 
-The 2,685-statement denominator belongs to this code snapshot. The 1,034
+The 2,695-statement denominator belongs to this code snapshot. The 1,018
 missed count is the observed run result; bounded runtime and worker thread
 timing can cause small run-to-run changes in which lines execute.
 
@@ -99,6 +100,11 @@ before and after. `git status --short` was empty before and after.
 - A V1 sprite frame is capped at 103,040 bytes (224 x 460). Imports validate
   every normalized frame before creating destination files; the sender records
   and clears an oversized job, then continues serving later jobs.
+- Catalog scanning advertises a type only when at least one canonical frame is
+  a regular file within the V1 ceiling. Heartbeat and sprite-ping therefore do
+  not induce retries for oversized-only legacy/manual directories. Mixed types
+  remain advertised, and the sender skips oversized frames while sending every
+  legal frame.
 - Network worker handoff captures immutable endpoint tuples under registry
   locking. Membership mutation and per-peer send errors cannot terminate the
   only listener thread. Constructor failure closes the UDP socket.
@@ -116,9 +122,9 @@ before and after. `git status --short` was empty before and after.
 
 ## Repository scope
 
-The hardening range `d4c92f4..34fd60e` changes 32 files with 1,645 insertions
-and 309 deletions. The complete M0-M1 range from the original `main` base changes
-71 files with 6,890 insertions and 915 deletions. The isolated worktree was
+The hardening range `d4c92f4..65e0f62` changes 33 files with 1,789 insertions
+and 308 deletions. The complete M0-M1 range from the original `main` base changes
+71 files with 7,035 insertions and 915 deletions. The isolated worktree was
 clean at the code commit.
 
 ## Known limitations and pending evidence

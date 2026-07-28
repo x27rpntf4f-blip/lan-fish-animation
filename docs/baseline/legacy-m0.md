@@ -100,8 +100,8 @@ denominator, and M1 does not define or enforce a coverage threshold.
 ## Final hardening result
 
 The 2026-07-28 hardening code snapshot is
-`34fd60e3135c8904f71595188c27f2fdeb25e867`. Its fresh local gate collected and
-passed 205 tests. Whole-`src` coverage is 61% (2,685 statements, 1,034 missed in
+`65e0f620fd97bdd5caff150baff50bee1379ad80`. Its fresh local gate collected and
+passed 207 tests. Whole-`src` coverage is 62% (2,695 statements, 1,018 missed in
 the observed run; bounded thread timing can vary the missed count slightly).
 This supersedes the historical test and coverage totals above without rewriting
 the earlier evidence. Remote 3 OS x 3 Python CI and a real three-machine LAN run
