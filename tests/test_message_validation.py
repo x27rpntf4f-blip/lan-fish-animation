@@ -200,7 +200,11 @@ def test_unpack_transfer_rejects_out_of_protocol_range(
         message.unpack_transfer(payload)
 
 
-def test_handler_discards_non_finite_transfer_and_accepts_next_packet(caplog) -> None:
+def test_handler_discards_non_finite_transfer_and_accepts_next_packet(
+    caplog,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(mesh_logging, "_NETWORK_EVENT_LIMITER", EventRateLimiter())
     fields = [1, 10.0, 20.0, math.inf, 100.0, 1.0, 1, 2, 3]
     transfer_payload = struct.pack(message.TRANSFER_PREFIX_FMT, *fields) + b"\x01A\x03\x20\x01"
     invalid_packet = message.pack_full(message.MSG_TRANSFER, 1, transfer_payload)
@@ -214,29 +218,37 @@ def test_handler_discards_non_finite_transfer_and_accepts_next_packet(caplog) ->
         def rebuild_topology(self) -> None:
             pass
 
-    with caplog.at_level(logging.WARNING):
-        main.handle_network_message(
-            invalid_packet,
-            ("192.0.2.10", 6200),
-            object(),
-            Registry(),
-            [],
-            800,
-            600,
-            object(),
-            object(),
-        )
-        main.handle_network_message(
-            goodbye_packet,
-            ("192.0.2.10", 6200),
-            object(),
-            Registry(),
-            [],
-            800,
-            600,
-            object(),
-            object(),
-        )
+    handler_logger = logging.getLogger("fish_demo.network_handlers")
+    original_propagate = handler_logger.propagate
+    handler_logger.addHandler(caplog.handler)
+    handler_logger.propagate = False
+    try:
+        with caplog.at_level(logging.WARNING):
+            main.handle_network_message(
+                invalid_packet,
+                ("192.0.2.10", 6200),
+                object(),
+                Registry(),
+                [],
+                800,
+                600,
+                object(),
+                object(),
+            )
+            main.handle_network_message(
+                goodbye_packet,
+                ("192.0.2.10", 6200),
+                object(),
+                Registry(),
+                [],
+                800,
+                600,
+                object(),
+                object(),
+            )
+    finally:
+        handler_logger.removeHandler(caplog.handler)
+        handler_logger.propagate = original_propagate
 
     assert removed == ["192.0.2.10:6200"]
     assert any(record.event == "packet_discarded" for record in caplog.records)
