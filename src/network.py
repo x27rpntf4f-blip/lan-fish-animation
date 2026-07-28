@@ -32,6 +32,7 @@ class HostInfo:
 class HostRegistry:
     def __init__(self, port):
         self.hosts = {}  # "ip:port" → HostInfo
+        self._lock = threading.RLock()
         self.my_hostname = socket.gethostname()
         self.my_ip = self._get_my_ip()
         self.my_port = port
@@ -82,29 +83,30 @@ class HostRegistry:
         return ip
 
     def add_or_update(self, hostname, ip, port, reachable_ip=None):
-        key = HostInfo.make_key(ip, port)
-        if key == self.my_key:
-            return
-        if key not in self.hosts:
-            self.hosts[key] = HostInfo(hostname, ip, port, reachable_ip)
-        else:
-            h = self.hosts[key]
-            h.hostname = hostname
-            h.port = port
-            h.last_heartbeat = time.time()
-            if reachable_ip:
-                h.reachable_ip = reachable_ip
+        with self._lock:
+            key = HostInfo.make_key(ip, port)
+            if key == self.my_key:
+                return
+            if key not in self.hosts:
+                self.hosts[key] = HostInfo(hostname, ip, port, reachable_ip)
+            else:
+                h = self.hosts[key]
+                h.hostname = hostname
+                h.port = port
+                h.last_heartbeat = time.time()
+                if reachable_ip:
+                    h.reachable_ip = reachable_ip
 
-        # Also keep track of known port->key mappings so that
-        # heartbeats arriving from different local IPs (multi-homed
-        # machines) can still be matched to the right host.
-        if not hasattr(self, "_port_keys"):
-            self._port_keys = {}
-        port_key = f"{port}"
-        if port_key not in self._port_keys:
-            self._port_keys[port_key] = []
-        if key not in self._port_keys[port_key]:
-            self._port_keys[port_key].append(key)
+            # Also keep track of known port->key mappings so that
+            # heartbeats arriving from different local IPs (multi-homed
+            # machines) can still be matched to the right host.
+            if not hasattr(self, "_port_keys"):
+                self._port_keys = {}
+            port_key = f"{port}"
+            if port_key not in self._port_keys:
+                self._port_keys[port_key] = []
+            if key not in self._port_keys[port_key]:
+                self._port_keys[port_key].append(key)
 
     def heartbeat(self, ip, port, reachable_ip=None):
         # 1) Exact match by (ip, port) — works for single-interface hosts
@@ -144,14 +146,20 @@ class HostRegistry:
                 h.reachable_ip = reachable_ip
 
     def remove_by_key(self, key):
-        self.hosts.pop(key, None)
-        # Clean up port→key mappings so stale entries don't accumulate
-        if hasattr(self, "_port_keys"):
-            for port_key, keys in list(self._port_keys.items()):
-                if key in keys:
-                    keys.remove(key)
-                if not keys:
-                    del self._port_keys[port_key]
+        with self._lock:
+            self.hosts.pop(key, None)
+            # Clean up port→key mappings so stale entries don't accumulate
+            if hasattr(self, "_port_keys"):
+                for port_key, keys in list(self._port_keys.items()):
+                    if key in keys:
+                        keys.remove(key)
+                    if not keys:
+                        del self._port_keys[port_key]
+
+    def endpoint_snapshot(self):
+        """Return immutable reachable endpoints for cross-thread handoff."""
+        with self._lock:
+            return tuple((host.reachable_ip, host.port) for host in self.hosts.values())
 
     def check_timeout(self, timeout=10):
         now = time.time()
@@ -199,29 +207,32 @@ class HostRegistry:
 class NetworkManager:
     def __init__(self, start_port=6000):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        if hasattr(socket, "SO_REUSEPORT"):
-            try:
-                self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-            except OSError as exc:
-                log_rate_limited_event(
-                    logger,
-                    logging.DEBUG,
-                    "SO_REUSEPORT is unavailable",
-                    event="socket_option_unavailable",
-                    stable_key="SO_REUSEPORT",
-                    extra={"error": str(exc)},
-                )
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-
-        self.port = self._bind(start_port)
+        try:
+            if hasattr(socket, "SO_REUSEPORT"):
+                try:
+                    self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+                except OSError as exc:
+                    log_rate_limited_event(
+                        logger,
+                        logging.DEBUG,
+                        "SO_REUSEPORT is unavailable",
+                        event="socket_option_unavailable",
+                        stable_key="SO_REUSEPORT",
+                        extra={"error": str(exc)},
+                    )
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            self.port = self._bind(start_port)
+        except BaseException:
+            self.sock.close()
+            raise
         # Always broadcast to the well-known port range, not
         # the instance's own port, so cross-port instances receive
         self.broadcast_base = 6000
         self.running = False
         self.thread = None
-        self._hb_data = None  # heartbeat payload set by main thread
-        self._hb_registry = None  # registry snapshot for heartbeat
+        self._pending_lock = threading.Lock()
+        self._pending_send = None
 
     def _bind(self, port):
         for off in range(10):
@@ -249,8 +260,9 @@ class NetworkManager:
     def send_heartbeat_async(self, data, registry):
         """Store heartbeat data so the network thread sends it.
         Returns immediately — no sendto() on the main thread."""
-        self._hb_data = data
-        self._hb_registry = registry
+        endpoints = None if registry is None else registry.endpoint_snapshot()
+        with self._pending_lock:
+            self._pending_send = (data, endpoints)
 
     def _loop(self, queue):
         self.sock.settimeout(0.5)
@@ -261,6 +273,8 @@ class NetworkManager:
             except TimeoutError:
                 pass
             except Exception as exc:
+                if not self.running:
+                    break
                 log_rate_limited_event(
                     logger,
                     logging.WARNING,
@@ -277,15 +291,25 @@ class NetworkManager:
             # the network thread (sendto) and the main render thread.
             # Discovery of new hosts is handled by HELLO at startup
             # and heartbeat-triggered discovery in the msg handler.
-            if self._hb_data is not None:
-                data = self._hb_data
-                reg = self._hb_registry
-                self._hb_data = None
-                self._hb_registry = None
-                if reg is not None:
-                    self.send_known(data, reg)  # heartbeat: unicast
-                else:
-                    self.broadcast(data)  # discovery: broadcast
+            with self._pending_lock:
+                pending_send = self._pending_send
+                self._pending_send = None
+            if pending_send is not None:
+                data, endpoints = pending_send
+                try:
+                    if endpoints is not None:
+                        self.send_known(data, endpoints)  # heartbeat: unicast
+                    else:
+                        self.broadcast(data)  # discovery: broadcast
+                except Exception as exc:
+                    log_rate_limited_event(
+                        logger,
+                        logging.WARNING,
+                        "Pending UDP send failed",
+                        event="pending_send_failed",
+                        stable_key="network-worker",
+                        extra={"error": str(exc)},
+                    )
 
     def broadcast(self, data):
         """Send a single broadcast to the well-known port.  One hop is
@@ -318,17 +342,28 @@ class NetworkManager:
                 extra={"peer": peer, "error": str(exc)},
             )
 
-    def send_known(self, data, registry):
-        """Unicast *data* to every host currently in the registry.
+    def send_known(self, data, endpoints):
+        """Unicast *data* to an immutable endpoint snapshot.
         Used for heartbeats so known peers get reliable delivery
         without needing the 10-port broadcast hammer."""
-        for h in registry.hosts.values():
-            self.send(h.reachable_ip, h.port, data)
+        for ip, port in endpoints:
+            try:
+                self.send(ip, port, data)
+            except Exception as exc:
+                peer = f"{ip}:{port}"
+                log_rate_limited_event(
+                    logger,
+                    logging.WARNING,
+                    "UDP endpoint send failed",
+                    event="packet_send_failed",
+                    stable_key=peer,
+                    extra={"peer": peer, "error": str(exc)},
+                )
 
     def shutdown(self):
         self.running = False
-        if self.thread:
-            self.thread.join(timeout=1)
+        with self._pending_lock:
+            self._pending_send = None
         try:
             self.sock.close()
         except Exception as exc:
@@ -338,5 +373,7 @@ class NetworkManager:
                 "UDP socket close failed",
                 event="socket_close_failed",
                 stable_key="socket",
-                extra={"error": str(exc)},
-            )
+                    extra={"error": str(exc)},
+                )
+        if self.thread:
+            self.thread.join(timeout=1)
