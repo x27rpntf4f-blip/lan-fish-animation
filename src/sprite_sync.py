@@ -17,6 +17,8 @@ SpriteSyncManager —— 网络精灵分片接收与重组。
 import logging
 from typing import TypedDict
 
+import message
+from fishmesh.errors import PacketDecodeError
 from fishmesh.sprite_names import (
     atomic_write_sprite_bytes,
     resolve_sprite_directory,
@@ -88,29 +90,40 @@ class SpriteSyncManager:
         name = validate_sprite_name(info["name"])
         resolve_sprite_directory(self._sprites_dir, name)
         key = (name, info["frame_index"])
+        total = info["total_chunks"]
+        chunk_index = info["chunk_index"]
+        chunk_data = info["data"]
+        if not 1 <= total <= message.MAX_SPRITE_CHUNKS:
+            raise PacketDecodeError("SPRITE_CHUNK total chunk count is outside protocol range")
+        if not 0 <= chunk_index < total:
+            raise PacketDecodeError("SPRITE_CHUNK chunk index is outside the frame")
+        if len(chunk_data) > message.MAX_SPRITE_CHUNK_BYTES:
+            raise PacketDecodeError("SPRITE_CHUNK chunk data exceeds protocol limit")
         entry = self._pending.get(key)
+
+        if entry is not None and entry["total"] != total:
+            self._pending.pop(key, None)
+            raise PacketDecodeError("SPRITE_CHUNK has conflicting total chunk count")
 
         # ── 新建 entry（必要时淘汰最早一条）──
         if entry is None:
             if len(self._pending) >= self.MAX_PENDING:
                 self._drop_oldest()
             entry = PendingEntry(
-                total=info["total_chunks"],
+                total=total,
                 received=0,  # 32-bit 位掩码，每位对应一个 chunk idx
                 chunks={},
             )
             self._pending[key] = entry
 
         # ── 写入 chunk（重复时用新数据覆盖，等价于幂等）──
-        ci = info["chunk_index"]
+        ci = chunk_index
         if ci not in entry["chunks"]:
-            entry["chunks"][ci] = info["data"]
+            entry["chunks"][ci] = chunk_data
             # 把第 ci 位置 1；用 OR 避免重复设置产生副作用
             entry["received"] |= 1 << ci
 
         # ── 完整性判定：前 total 位是否全部 1 ──
-        if entry["total"] == 0:
-            return False
         # (1 << total) - 1 即低 total 位全 1 的掩码
         expected_mask = (1 << entry["total"]) - 1
         if (entry["received"] & expected_mask) != expected_mask:

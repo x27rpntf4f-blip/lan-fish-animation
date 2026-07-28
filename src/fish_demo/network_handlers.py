@@ -245,7 +245,7 @@ def handle_network_message(
         info = decoded
         try:
             complete = sync_mgr.feed_chunk(info)
-        except InvalidSpriteName as exc:
+        except (InvalidSpriteName, PacketDecodeError) as exc:
             logger.warning(
                 "Discarding unsafe sprite chunk",
                 extra={

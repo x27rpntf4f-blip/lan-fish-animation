@@ -112,6 +112,68 @@ def test_complete_chunk_is_written_below_sprite_root(tmp_path: Path) -> None:
     assert (tmp_path / "Purple" / "Fish-1.png").read_bytes() == b"png-data"
 
 
+def test_conflicting_chunk_total_clears_pending_frame(tmp_path: Path) -> None:
+    manager = SpriteSyncManager(tmp_path)
+    first = {
+        "name": "Purple",
+        "frame_index": 0,
+        "total_chunks": 2,
+        "chunk_index": 0,
+        "data": b"first",
+    }
+    conflicting = first | {"total_chunks": 3, "chunk_index": 1, "data": b"conflict"}
+
+    assert manager.feed_chunk(first) is False
+    with pytest.raises(ValueError, match="conflicting"):
+        manager.feed_chunk(conflicting)
+
+    assert manager.pending_count() == 0
+    assert list(tmp_path.rglob("*.png")) == []
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        {
+            "name": "Purple",
+            "frame_index": 0,
+            "total_chunks": 0,
+            "chunk_index": 0,
+            "data": b"x",
+        },
+        {
+            "name": "Purple",
+            "frame_index": 0,
+            "total_chunks": 225,
+            "chunk_index": 0,
+            "data": b"x",
+        },
+        {
+            "name": "Purple",
+            "frame_index": 0,
+            "total_chunks": 1,
+            "chunk_index": 1,
+            "data": b"x",
+        },
+        {
+            "name": "Purple",
+            "frame_index": 0,
+            "total_chunks": 1,
+            "chunk_index": 0,
+            "data": b"x" * 461,
+        },
+    ],
+    ids=["zero-total", "too-many-chunks", "index-out-of-range", "oversized-data"],
+)
+def test_invalid_chunk_fields_do_not_allocate_pending_state(tmp_path: Path, info: dict) -> None:
+    manager = SpriteSyncManager(tmp_path)
+
+    with pytest.raises(ValueError):
+        manager.feed_chunk(info)
+
+    assert manager.pending_count() == 0
+
+
 def test_unsafe_chunk_name_never_creates_pending_state_or_files(tmp_path: Path) -> None:
     manager = SpriteSyncManager(tmp_path)
 

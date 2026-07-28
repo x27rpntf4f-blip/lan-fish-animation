@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import struct
 from collections.abc import Callable
 
@@ -148,6 +149,111 @@ def test_pack_sprite_chunk_truncates_name_at_utf8_boundary() -> None:
         0,
         lambda payload: message.unpack_sprite_chunk(payload)["name"],
     )
+
+
+def test_pack_hello_truncates_hostname_at_utf8_boundary() -> None:
+    hostname = "a" * 31 + "锦"
+
+    packet = message.pack_hello(1, hostname, "192.0.2.10", 6200)
+    _, payload = message.unpack_full(packet)
+
+    assert payload[0] == 31
+    assert message.unpack_hello(payload)["hostname"] == "a" * 31
+
+
+@pytest.mark.parametrize("field_index", range(1, 6), ids=["x", "y", "direction", "speed", "size"])
+@pytest.mark.parametrize("invalid", [math.nan, math.inf, -math.inf], ids=["nan", "inf", "neg-inf"])
+def test_unpack_transfer_rejects_non_finite_float_fields(
+    field_index: int,
+    invalid: float,
+) -> None:
+    fields = [1, 10.0, 20.0, 0.0, 100.0, 1.0, 1, 2, 3]
+    fields[field_index] = invalid
+    payload = struct.pack(message.TRANSFER_PREFIX_FMT, *fields) + b"\x01A\x03\x20\x01"
+
+    with pytest.raises(PacketDecodeError, match="TRANSFER.*finite"):
+        message.unpack_transfer(payload)
+
+
+@pytest.mark.parametrize(
+    ("field_index", "invalid"),
+    [
+        (1, 100_001.0),
+        (2, -100_001.0),
+        (3, 1_001.0),
+        (4, -0.01),
+        (4, 10_001.0),
+        (5, 0.0),
+        (5, 101.0),
+    ],
+    ids=["x", "y", "direction", "negative-speed", "speed", "zero-size", "size"],
+)
+def test_unpack_transfer_rejects_out_of_protocol_range(
+    field_index: int,
+    invalid: float,
+) -> None:
+    fields = [1, 10.0, 20.0, 0.0, 100.0, 1.0, 1, 2, 3]
+    fields[field_index] = invalid
+    payload = struct.pack(message.TRANSFER_PREFIX_FMT, *fields) + b"\x01A\x03\x20\x01"
+
+    with pytest.raises(PacketDecodeError, match="TRANSFER.*range"):
+        message.unpack_transfer(payload)
+
+
+def test_handler_discards_non_finite_transfer_and_accepts_next_packet(caplog) -> None:
+    fields = [1, 10.0, 20.0, math.inf, 100.0, 1.0, 1, 2, 3]
+    transfer_payload = struct.pack(message.TRANSFER_PREFIX_FMT, *fields) + b"\x01A\x03\x20\x01"
+    invalid_packet = message.pack_full(message.MSG_TRANSFER, 1, transfer_payload)
+    goodbye_packet = message.pack_goodbye(1)
+    removed: list[str] = []
+
+    class Registry:
+        def remove_by_key(self, key: str) -> None:
+            removed.append(key)
+
+        def rebuild_topology(self) -> None:
+            pass
+
+    with caplog.at_level(logging.WARNING):
+        main.handle_network_message(
+            invalid_packet,
+            ("192.0.2.10", 6200),
+            object(),
+            Registry(),
+            [],
+            800,
+            600,
+            object(),
+            object(),
+        )
+        main.handle_network_message(
+            goodbye_packet,
+            ("192.0.2.10", 6200),
+            object(),
+            Registry(),
+            [],
+            800,
+            600,
+            object(),
+            object(),
+        )
+
+    assert removed == ["192.0.2.10:6200"]
+    assert any(record.event == "packet_discarded" for record in caplog.records)
+
+
+@pytest.mark.parametrize(
+    ("total_chunks", "chunk_index"),
+    [(0, 0), (225, 0), (1, 1), (2, 2)],
+)
+def test_unpack_sprite_chunk_rejects_invalid_chunk_bounds(
+    total_chunks: int,
+    chunk_index: int,
+) -> None:
+    payload = struct.pack("!BBBBH", 1, 0, total_chunks, chunk_index, 1) + b"A!"
+
+    with pytest.raises(PacketDecodeError, match="SPRITE_CHUNK.*chunk"):
+        message.unpack_sprite_chunk(payload)
 
 
 def test_handler_discards_malformed_packet_without_mutating_state(caplog) -> None:

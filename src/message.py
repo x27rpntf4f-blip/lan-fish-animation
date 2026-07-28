@@ -29,6 +29,16 @@ MSG_NAMES = {
 
 HEADER_FMT = "!BBIH"  # type, sender_id, timestamp_ms, payload_len
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
+MAX_SPRITE_CHUNKS = 224
+MAX_SPRITE_CHUNK_BYTES = 460
+
+_TRANSFER_FLOAT_RANGES = {
+    "x": (-100_000.0, 100_000.0),
+    "y": (-100_000.0, 100_000.0),
+    "direction": (-1_000.0, 1_000.0),
+    "speed": (0.0, 10_000.0),
+    "size": (0.05, 100.0),
+}
 
 
 def _encode_text(value: str, max_bytes: int = 255) -> bytes:
@@ -92,7 +102,7 @@ def unpack_full(data: bytes) -> tuple[tuple[int, int, int, int], bytes]:
 
 def pack_hello(sender_id, hostname, ip_str, port):
     ip_bytes = socket.inet_aton(ip_str)
-    hostname_bytes = hostname.encode("utf-8")[:32]
+    hostname_bytes = _encode_text(hostname, max_bytes=32)
     payload = struct.pack("!B", len(hostname_bytes)) + hostname_bytes + ip_bytes
     payload += struct.pack("!H", port)
     return pack_full(MSG_HELLO, sender_id, payload)
@@ -209,14 +219,25 @@ TRANSFER_PREFIX_FMT = "!Hfffff3B"   # fish_id thru color (10 bytes)
 TRANSFER_PREFIX_SIZE = struct.calcsize(TRANSFER_PREFIX_FMT)
 
 
+def _validate_transfer_floats(values, error_type):
+    for field, value in zip(_TRANSFER_FLOAT_RANGES, values, strict=True):
+        if not math.isfinite(value):
+            raise error_type(f"TRANSFER {field} must be finite")
+        minimum, maximum = _TRANSFER_FLOAT_RANGES[field]
+        if not minimum <= value <= maximum:
+            raise error_type(
+                f"TRANSFER {field} is outside protocol range [{minimum}, {maximum}]"
+            )
+
+
 def pack_transfer(sender_id, fish, source_screen_w=0):
+    transfer_floats = (fish.x, fish.y, fish.direction, fish.speed, fish.size)
+    _validate_transfer_floats(transfer_floats, ValueError)
     name_bytes = _encode_text(fish.fish_type)
     src_hi = (source_screen_w >> 8) & 0xFF
     src_lo = source_screen_w & 0xFF
     heading_byte = 1 if math.cos(fish.direction) >= 0 else 0
-    prefix = struct.pack(TRANSFER_PREFIX_FMT,
-                         fish.fish_id, fish.x, fish.y, fish.direction,
-                         fish.speed, fish.size, *fish.color)
+    prefix = struct.pack(TRANSFER_PREFIX_FMT, fish.fish_id, *transfer_floats, *fish.color)
     suffix = struct.pack("!B", len(name_bytes)) + name_bytes
     suffix += struct.pack("!BB", src_hi, src_lo)
     suffix += struct.pack("!B", heading_byte)
@@ -231,6 +252,7 @@ def unpack_transfer(payload):
         )
 
     prefix = struct.unpack(TRANSFER_PREFIX_FMT, payload[:TRANSFER_PREFIX_SIZE])
+    _validate_transfer_floats(prefix[1:6], PacketDecodeError)
     tail = payload[TRANSFER_PREFIX_SIZE:]
 
     if len(tail) >= 2:
@@ -338,6 +360,14 @@ def unpack_sprite_request(payload):
 
 def pack_sprite_chunk(sender_id, sprite_name, frame_index, total_chunks,
                       chunk_index, data):
+    if not 1 <= total_chunks <= MAX_SPRITE_CHUNKS:
+        raise ValueError(f"SPRITE_CHUNK total_chunks must be in [1, {MAX_SPRITE_CHUNKS}]")
+    if not 0 <= chunk_index < total_chunks:
+        raise ValueError("SPRITE_CHUNK chunk_index must be less than total_chunks")
+    if len(data) > MAX_SPRITE_CHUNK_BYTES:
+        raise ValueError(
+            f"SPRITE_CHUNK data exceeds {MAX_SPRITE_CHUNK_BYTES} bytes"
+        )
     nb = _encode_text(sprite_name)
     header = struct.pack("!BBBBH",
                          len(nb),
@@ -355,6 +385,16 @@ def unpack_sprite_chunk(payload):
     name_len, frame_idx, total, chunk_idx = \
         struct.unpack("!BBBB", payload[:4])
     data_len = struct.unpack("!H", payload[4:6])[0]
+    if not 1 <= total <= MAX_SPRITE_CHUNKS:
+        raise PacketDecodeError(
+            f"SPRITE_CHUNK total chunk count must be in [1, {MAX_SPRITE_CHUNKS}]"
+        )
+    if chunk_idx >= total:
+        raise PacketDecodeError("SPRITE_CHUNK chunk index must be less than total chunks")
+    if data_len > MAX_SPRITE_CHUNK_BYTES:
+        raise PacketDecodeError(
+            f"SPRITE_CHUNK chunk data exceeds {MAX_SPRITE_CHUNK_BYTES} bytes"
+        )
     expected_size = 6 + name_len + data_len
     if len(payload) != expected_size:
         raise PacketDecodeError(
