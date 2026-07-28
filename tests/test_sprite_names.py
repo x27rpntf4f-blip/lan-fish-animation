@@ -612,6 +612,136 @@ def test_legacy_migration_does_not_trust_empty_sentinel(tmp_path: Path) -> None:
     assert (sprite_root / "Fish A" / "Fish-1.png").read_bytes() == b"legacy-a"
 
 
+def test_legacy_migration_rejects_symlink_sprite_root(tmp_path: Path) -> None:
+    old_root = tmp_path / "Free Fish Icons"
+    outside = tmp_path / "outside"
+    sprite_root = tmp_path / "fish_sprites"
+    old_root.mkdir()
+    outside.mkdir()
+    sprite_root.symlink_to(outside, target_is_directory=True)
+    (old_root / "FishA-1.png").write_bytes(b"legacy-a")
+    manager = SpriteManager.__new__(SpriteManager)
+    manager.OLD_DIR = str(old_root)
+    manager.SPRITE_DIR = str(sprite_root)
+
+    with pytest.raises(InvalidSpriteName):
+        manager._migrate_if_needed()
+
+    assert list(outside.iterdir()) == []
+
+
+def test_legacy_migration_rejects_symlink_target_type(tmp_path: Path) -> None:
+    old_root = tmp_path / "Free Fish Icons"
+    sprite_root = tmp_path / "fish_sprites"
+    outside = tmp_path / "outside"
+    old_root.mkdir()
+    sprite_root.mkdir()
+    outside.mkdir()
+    (old_root / "FishA-1.png").write_bytes(b"legacy-a")
+    (sprite_root / "Fish A").symlink_to(outside, target_is_directory=True)
+    manager = SpriteManager.__new__(SpriteManager)
+    manager.OLD_DIR = str(old_root)
+    manager.SPRITE_DIR = str(sprite_root)
+
+    with pytest.raises(InvalidSpriteName):
+        manager._migrate_if_needed()
+
+    assert list(outside.iterdir()) == []
+
+
+def test_directory_validation_rejects_windows_reparse_attribute(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    directory = tmp_path / "sprites"
+    directory.mkdir()
+    original_lstat = Path.lstat
+
+    class ReparseMetadata:
+        st_mode = directory.stat().st_mode
+        st_file_attributes = 0x00000400
+
+    def reparse_lstat(path: Path):
+        if path == directory:
+            return ReparseMetadata()
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+
+    with pytest.raises(InvalidSpriteName, match="reparse"):
+        sprite_names_module.ensure_safe_directory(directory)
+
+
+def test_legacy_migration_skips_source_symlink(tmp_path: Path) -> None:
+    old_root = tmp_path / "Free Fish Icons"
+    sprite_root = tmp_path / "fish_sprites"
+    outside = tmp_path / "outside.png"
+    old_root.mkdir()
+    sprite_root.mkdir()
+    outside.write_bytes(b"outside-secret")
+    (old_root / "FishA-1.png").symlink_to(outside)
+    manager = SpriteManager.__new__(SpriteManager)
+    manager.OLD_DIR = str(old_root)
+    manager.SPRITE_DIR = str(sprite_root)
+
+    manager._migrate_if_needed()
+
+    assert not (sprite_root / "Fish A" / "Fish-1.png").exists()
+    assert outside.read_bytes() == b"outside-secret"
+
+
+def test_legacy_migration_fails_closed_when_source_changes_while_opening(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_root = tmp_path / "Free Fish Icons"
+    sprite_root = tmp_path / "fish_sprites"
+    source = old_root / "FishA-1.png"
+    moved_source = old_root / "original.png"
+    outside = tmp_path / "outside.png"
+    old_root.mkdir()
+    sprite_root.mkdir()
+    source.write_bytes(b"legacy-a")
+    outside.write_bytes(b"outside-secret")
+    manager = SpriteManager.__new__(SpriteManager)
+    manager.OLD_DIR = str(old_root)
+    manager.SPRITE_DIR = str(sprite_root)
+    original_open = Path.open
+    attacked = False
+
+    def swap_before_open(path: Path, *args, **kwargs):
+        nonlocal attacked
+        if path == source and not attacked:
+            source.rename(moved_source)
+            source.symlink_to(outside)
+            attacked = True
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", swap_before_open)
+
+    manager._migrate_if_needed()
+
+    assert attacked is True
+    assert not (sprite_root / "Fish A" / "Fish-1.png").exists()
+    assert outside.read_bytes() == b"outside-secret"
+
+
+def test_atomic_create_if_missing_never_overwrites_existing_frame(tmp_path: Path) -> None:
+    destination = tmp_path / "Purple" / "Fish-1.png"
+    destination.parent.mkdir()
+    destination.write_bytes(b"canonical")
+
+    created = sprite_names_module.atomic_write_sprite_bytes_if_missing(
+        tmp_path,
+        "Purple",
+        "Fish-1.png",
+        b"legacy",
+    )
+
+    assert created is False
+    assert destination.read_bytes() == b"canonical"
+
+
 def test_local_import_replaces_frame_symlink_without_overwriting_target(tmp_path: Path) -> None:
     source = tmp_path / "source"
     sprite_root = tmp_path / "sprites"

@@ -21,10 +21,18 @@ import logging
 import os
 import re
 import shutil
+import stat
 
 import pygame
 
-from fishmesh.sprite_names import atomic_replace_sprite_file, resolve_sprite_directory
+from fishmesh.sprite_names import (
+    InvalidSpriteName,
+    atomic_replace_sprite_file,
+    atomic_write_sprite_bytes_if_missing,
+    ensure_safe_directory,
+    read_regular_file,
+    resolve_sprite_directory,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,19 +80,25 @@ class SpriteManager:
             FishB-1.png ...              → fish_sprites/Fish B/Fish-1.png, ...
         已存在的 canonical 文件从不覆盖；非 legacy 目标类型不影响判定。
         """
-        if not os.path.isdir(self.OLD_DIR):
+        old_root = ensure_safe_directory(self.OLD_DIR, allow_missing=True)
+        if not old_root.exists():
             return
+        sprite_root = ensure_safe_directory(self.SPRITE_DIR, allow_missing=True)
 
         legacy_frames = []
-        for file_name in sorted(os.listdir(self.OLD_DIR)):
+        for file_name in sorted(os.listdir(old_root)):
             match = re.fullmatch(
                 r"Fish(?P<type>[A-Za-z0-9]+)-(?P<frame>\d+)\.png",
                 file_name,
             )
             if match is None:
                 continue
-            source = os.path.join(self.OLD_DIR, file_name)
-            if not os.path.isfile(source):
+            source = old_root / file_name
+            try:
+                source_metadata = source.lstat()
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISREG(source_metadata.st_mode):
                 continue
             target_type = f"Fish {match.group('type')}"
             target_file = f"Fish-{match.group('frame')}.png"
@@ -96,7 +110,7 @@ class SpriteManager:
         target_types = {target_type for _, target_type, _ in legacy_frames}
 
         def has_canonical_frame(target_type):
-            type_dir = os.path.join(self.SPRITE_DIR, target_type)
+            _, type_dir = resolve_sprite_directory(sprite_root, target_type)
             return os.path.isdir(type_dir) and any(
                 re.fullmatch(r"Fish-\d+\.png", file_name, re.IGNORECASE)
                 and os.path.isfile(os.path.join(type_dir, file_name))
@@ -106,16 +120,30 @@ class SpriteManager:
         if all(has_canonical_frame(target_type) for target_type in target_types):
             return
 
-        os.makedirs(self.SPRITE_DIR, exist_ok=True)
+        os.makedirs(sprite_root, exist_ok=True)
         copied = False
         for source, target_type, target_file in legacy_frames:
-            type_dir = os.path.join(self.SPRITE_DIR, target_type)
-            os.makedirs(type_dir, exist_ok=True)
-            destination = os.path.join(type_dir, target_file)
-            if os.path.lexists(destination):
+            try:
+                source_data = read_regular_file(old_root, source.name)
+            except InvalidSpriteName as exc:
+                logger.warning(
+                    "Skipped unsafe legacy sprite source",
+                    extra={
+                        "event": "sprite_migration_source_rejected",
+                        "file_name": source.name,
+                        "error": str(exc),
+                    },
+                )
                 continue
-            shutil.copy2(source, destination)
-            copied = True
+            copied = (
+                atomic_write_sprite_bytes_if_missing(
+                    sprite_root,
+                    target_type,
+                    target_file,
+                    source_data,
+                )
+                or copied
+            )
 
         if copied:
             logger.info(

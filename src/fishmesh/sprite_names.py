@@ -24,6 +24,25 @@ _WINDOWS_RESERVED = frozenset({"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"})
         for suffix in (*map(str, range(1, 10)), "¹", "²", "³")
     }
 )
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+
+
+def ensure_safe_directory(path: str | Path, *, allow_missing: bool = False) -> Path:
+    """Reject symlink/reparse directory roots before resolving them."""
+    directory = Path(path).absolute()
+    try:
+        metadata = directory.lstat()
+    except FileNotFoundError:
+        if allow_missing:
+            return directory
+        raise InvalidSpriteName("sprite directory does not exist") from None
+    if stat.S_ISLNK(metadata.st_mode) or (
+        getattr(metadata, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT
+    ):
+        raise InvalidSpriteName("sprite directory cannot be a symlink or reparse point")
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise InvalidSpriteName("sprite directory must be a directory")
+    return directory
 
 
 def validate_sprite_name(value: str) -> str:
@@ -55,8 +74,20 @@ def validate_sprite_name(value: str) -> str:
 def resolve_sprite_directory(sprite_root: str | Path, value: str) -> tuple[str, Path]:
     """Resolve a validated sprite name to a direct child of ``sprite_root``."""
     name = validate_sprite_name(value)
-    root = Path(sprite_root).resolve()
-    destination = (root / name).resolve()
+    root_path = ensure_safe_directory(sprite_root, allow_missing=True)
+    root = root_path.resolve()
+    candidate = root / name
+    try:
+        candidate_metadata = candidate.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        if stat.S_ISLNK(candidate_metadata.st_mode) or (
+            getattr(candidate_metadata, "st_file_attributes", 0)
+            & _FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            raise InvalidSpriteName("sprite destination cannot be a symlink or reparse point")
+    destination = candidate.resolve()
     if destination.parent != root:
         raise InvalidSpriteName("sprite destination must be a direct child of the sprite root")
     return name, destination
@@ -420,6 +451,94 @@ def atomic_write_sprite_bytes(
     )
 
 
+def atomic_write_sprite_bytes_if_missing(
+    sprite_root: str | Path,
+    sprite_name: str,
+    filename: str,
+    data: bytes,
+) -> bool:
+    """Create one sprite frame securely and atomically, never replacing an entry."""
+    _validate_file_component(filename)
+    root_path = ensure_safe_directory(sprite_root, allow_missing=True)
+    root_path.mkdir(parents=True, exist_ok=True)
+    sprite_name, destination_dir = resolve_sprite_directory(root_path, sprite_name)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    (
+        sprite_name,
+        root,
+        destination_dir,
+        root_identity,
+        directory_identity,
+    ) = _directory_snapshot(root_path, sprite_name)
+
+    with ExitStack() as resources:
+        directory_fd: int | None = None
+        verify_native_guard: Callable[[], None] | None = None
+        if _supports_directory_fd_replace():
+            directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            directory_fd = os.open(destination_dir, directory_flags)
+            resources.callback(os.close, directory_fd)
+            if _identity(os.fstat(directory_fd)) != directory_identity:
+                raise InvalidSpriteName("sprite directory changed while opening")
+        elif _is_windows_platform():
+            verify_native_guard = resources.enter_context(
+                _open_windows_directory_guard(destination_dir)
+            )
+            verify_native_guard()
+        else:
+            raise InvalidSpriteName("safe atomic sprite creation is unavailable")
+
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            if directory_fd is not None:
+                descriptor = os.open(filename, flags, 0o600, dir_fd=directory_fd)
+            else:
+                descriptor = os.open(destination_dir / filename, flags, 0o600)
+        except FileExistsError:
+            return False
+
+        created_identity = _identity(os.fstat(descriptor))
+        created = True
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                descriptor = -1
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+                if _identity(os.fstat(stream.fileno())) != created_identity:
+                    raise InvalidSpriteName("sprite frame changed during creation")
+            if verify_native_guard is not None:
+                verify_native_guard()
+            _assert_directory_snapshot(
+                root_path,
+                sprite_name,
+                root,
+                destination_dir,
+                root_identity,
+                directory_identity,
+            )
+            final_metadata = _entry_metadata(destination_dir, directory_fd, filename)
+            if (
+                not stat.S_ISREG(final_metadata.st_mode)
+                or _identity(final_metadata) != created_identity
+            ):
+                raise InvalidSpriteName("sprite frame changed during creation")
+            if directory_fd is not None:
+                os.fsync(directory_fd)
+            created = False
+            return True
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if created:
+                _safe_unlink_entry(
+                    destination_dir,
+                    directory_fd,
+                    filename,
+                    created_identity,
+                )
+
+
 def read_regular_sprite_file(
     sprite_root: str | Path,
     sprite_name: str,
@@ -450,3 +569,26 @@ def read_regular_sprite_file(
             return stream.read()
     except FileNotFoundError as exc:
         raise InvalidSpriteName("sprite frame disappeared while opening") from exc
+
+
+def read_regular_file(directory: str | Path, filename: str) -> bytes:
+    """Read a regular direct child while detecting symlink and replacement races."""
+    _validate_file_component(filename)
+    root = ensure_safe_directory(directory).resolve()
+    path = root / filename
+    try:
+        initial = path.lstat()
+        if not stat.S_ISREG(initial.st_mode):
+            raise InvalidSpriteName("source sprite frame must be a regular file")
+        with path.open("rb") as stream:
+            opened = os.fstat(stream.fileno())
+            current = path.lstat()
+            if not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(current.st_mode):
+                raise InvalidSpriteName("source sprite frame must remain a regular file")
+            if len({_identity(initial), _identity(opened), _identity(current)}) != 1:
+                raise InvalidSpriteName("source sprite frame changed while opening")
+            if path.resolve().parent != root:
+                raise InvalidSpriteName("source sprite frame escaped its directory")
+            return stream.read()
+    except FileNotFoundError as exc:
+        raise InvalidSpriteName("source sprite frame disappeared while opening") from exc
