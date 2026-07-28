@@ -4,7 +4,7 @@
 
 - Verification date: 2026-07-28 (Asia/Shanghai).
 - Branch: `codex/fishmesh-m0-m1`.
-- Code commit under verification: `65e0f620fd97bdd5caff150baff50bee1379ad80`.
+- Code commit under verification: `1843dff986340aaad76d91753e433535e1cc50d6`.
 - Final-hardening base: `d4c92f4f95f1811740af0c442e94c3dfee002153`.
 - Original project base: `603f7d31c795bac58740765b041c6bacc26f8659` (`main`).
 - This release record is a documentation-only descendant of the code commit.
@@ -42,13 +42,40 @@ Each behavior change was observed failing before its implementation.
 | V1 sprite frame ceiling | `uv run pytest tests/test_sprite_limits.py -q` -> 3 failed, 1 passed | Same command -> 4 passed with real normalized PNGs below and above 103,040 bytes plus worker recovery |
 | Closed logging stream | focused closed-file reconfiguration test -> 1 failed with `ValueError: I/O operation on closed file` | `tests/test_logging.py tests/test_runtime_lifecycle.py -q` -> 23 passed |
 | Advertised sprite availability | `uv run pytest tests/test_sprite_limits.py -q` -> 2 failed, 4 passed: oversized-only was advertised and a mixed job stopped before its legal frame | `tests/test_sprite_limits.py tests/test_sprite_worker.py tests/test_request_tracker.py -q` -> 13 passed; three heartbeat/ping retry rounds emitted no request for oversized-only, while mixed sent only its legal frame |
+| Cross-platform CI contracts | First remote CI exposed an incomplete pygame copy on Linux, locale text decoding on Windows, and a POSIX unlink attack that is invalid under Windows mandatory locking; three local source-contract assertions also failed before the edits | Revised wheel -> 1 passed; project/sprite focus -> 83 passed, 1 expected Windows-only skip on macOS; all three source-contract assertions passed |
 
 An earlier full-suite attempt exposed a rate-limiter isolation issue; that test
 now owns a fresh limiter and logger handler. Adding the audio logger later also
 exposed a hard-coded test cleanup list: a handler retained a closed capture
 stream, producing 9 failed and 195 passed. A real closed-file regression first
 failed, then the reconfiguration recovery and shared logger list passed the
-focused gate. The fresh full gate passes all 207 tests.
+focused gate. The fresh local gate collects 208 tests and reports 207 passed
+with one expected Windows-only mandatory-lock test skipped on macOS.
+
+## First remote CI failure analysis
+
+The first remote matrix run was not green and is not counted as platform
+verification. It exposed three test-harness portability defects rather than a
+V1 production-wire change:
+
+- The installed-wheel test copied only the `pygame` package directory. Linux
+  wheels also carry native libraries in a sibling `pygame.libs` directory, so
+  the isolated runtime was incomplete.
+- The tracked-bytecode contract asked Python to decode NUL-delimited Git output
+  with the Windows locale codec. A tracked non-ASCII path raised
+  `UnicodeDecodeError` before the ASCII bytecode checks ran.
+- The temporary-entry replacement attack assumes POSIX permits unlinking an
+  open file. Windows mandatory locking correctly blocks that unlink, so the
+  attack test itself was not portable.
+
+Commit `1843dff986340aaad76d91753e433535e1cc50d6` fixes those contracts. The
+wheel test now stages every path-safe site-packages file from the synced pygame
+distribution, including native payload and dist-info, before `uv` performs the
+offline fishmesh wheel install without `--no-deps`. Git paths stay as bytes.
+The unlink-replacement attack is POSIX-only, while Windows has an actual
+mandatory-lock test and the platform-independent native-guard rejection tests
+remain intact. These local results do not claim the 3 OS x 3 Python matrix is
+passing; a fresh remote run must establish that separately.
 
 ## Quality gate results
 
@@ -56,20 +83,24 @@ focused gate. The fresh full gate passes all 207 tests.
 | --- | --- |
 | `uv run ruff check src/fishmesh src/fish_demo tests scripts` | Exit 0; `All checks passed!` |
 | `uv run ty check src/fishmesh src/fish_demo` | Exit 0; `All checks passed!` |
-| `uv run pytest --cov=src --cov-report=term-missing` | Exit 0; 207 passed in 27.20 s; 62% whole-`src` coverage (2,695 statements, 1,018 missed) |
-| `PYTHONPYCACHEPREFIX=/private/tmp/fishmesh-final-pycache-20260728-65e0f62 uv run python -m compileall -q src` | Exit 0; no output |
-| `uv run pytest tests/test_wheel_install.py -q` | Exit 0; 1 passed in 23.11 s |
+| `uv run pytest --cov=src --cov-report=term-missing` | Exit 0; 208 collected, 207 passed and 1 expected platform skip in 19.37 s; 62% whole-`src` coverage (2,695 statements, 1,018 missed) |
+| `PYTHONPYCACHEPREFIX=/private/tmp/fishmesh-ci-pycache-1843dff uv run python -m compileall -q src` | Exit 0; no output |
+| `uv run pytest tests/test_wheel_install.py -q` | Exit 0; 1 passed in 25.99 s |
 | `git diff --check` | Exit 0; no output |
 
 The 2,695-statement denominator belongs to this code snapshot. The 1,018
 missed count is the observed run result; bounded runtime and worker thread
 timing can cause small run-to-run changes in which lines execute.
 
-The wheel test copies only the build inputs into a temporary source tree,
-builds and installs without editable-source access, loads and loops the packaged
-`water.wav` under dummy SDL, starts `fishmesh-demo` with audio enabled for 0.2
-seconds from an empty working directory, asserts 10 sprite types load, and
-compares the complete site-packages content digest before and after runtime.
+The wheel test copies only the fishmesh build inputs into a temporary source
+tree. It stages the complete path-safe site-packages portion of the pygame
+distribution installed by the preceding `uv sync`, explicitly requiring a
+native artifact and dist-info, then uses `uv` offline to install the fishmesh
+wheel with dependencies satisfied. It loads and loops packaged `water.wav`
+under dummy SDL, starts `fishmesh-demo` with audio enabled for 0.2 seconds from
+an empty working directory, asserts 10 sprite types load, and compares the
+complete site-packages digest taken after all installation with the digest
+after runtime.
 
 ## Runtime entry-point and side-effect probes
 
@@ -122,9 +153,9 @@ before and after. `git status --short` was empty before and after.
 
 ## Repository scope
 
-The hardening range `d4c92f4..65e0f62` changes 33 files with 1,789 insertions
-and 308 deletions. The complete M0-M1 range from the original `main` base changes
-71 files with 7,035 insertions and 915 deletions. The isolated worktree was
+The hardening range `d4c92f4..1843dff` changes 34 files with 1,863 insertions
+and 324 deletions. The complete M0-M1 range from the original `main` base changes
+71 files with 7,093 insertions and 915 deletions. The isolated worktree was
 clean at the code commit.
 
 ## Known limitations and pending evidence
