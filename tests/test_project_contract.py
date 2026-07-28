@@ -17,14 +17,13 @@ def test_repository_does_not_track_python_bytecode(tmp_path: Path, monkeypatch) 
         check=True,
         capture_output=True,
         cwd=repository_root,
-        text=True,
     )
 
     tracked_bytecode = [
         path
-        for path in result.stdout.split("\0")
+        for path in result.stdout.split(b"\0")
         if path
-        if "__pycache__" in Path(path).parts or path.endswith(".pyc")
+        if b"__pycache__" in path.split(b"/") or path.endswith(b".pyc")
     ]
 
     assert tracked_bytecode == []

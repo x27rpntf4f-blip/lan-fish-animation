@@ -242,7 +242,8 @@ def test_existing_frame_symlink_is_replaced_without_overwriting_target(tmp_path:
     assert destination.read_bytes() == b"safe-frame"
 
 
-def test_swapped_temporary_entry_is_rejected_without_touching_victim(
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permits unlinking an open temporary file")
+def test_posix_swapped_temporary_entry_is_rejected_without_touching_victim(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     sprite_root = tmp_path / "sprites"
@@ -280,6 +281,33 @@ def test_swapped_temporary_entry_is_rejected_without_touching_victim(
     assert manager.pending_count() == 0
     assert victim.read_bytes() == b"victim"
     assert not (sprite_dir / "Fish-1.png").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows mandatory file locking contract")
+def test_windows_open_temporary_file_cannot_be_swapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sprite_dir = tmp_path / "Purple"
+    original_fsync = os.fsync
+    lock_observed = False
+
+    def attempt_swap_while_open(descriptor: int) -> None:
+        nonlocal lock_observed
+        if not lock_observed:
+            temporary = next(sprite_dir.glob(".Fish-1.png.*.png"))
+            with pytest.raises(PermissionError):
+                temporary.unlink()
+            lock_observed = True
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", attempt_swap_while_open)
+
+    destination = sprite_names_module.atomic_write_sprite_bytes(
+        tmp_path, "Purple", "Fish-1.png", b"safe-frame"
+    )
+
+    assert lock_observed is True
+    assert destination.read_bytes() == b"safe-frame"
 
 
 def test_parent_swap_after_final_validation_is_rejected_and_rolled_back(

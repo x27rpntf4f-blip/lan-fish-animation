@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
-
-import pygame
 
 RUNTIME_MODULES = (
     "audio_manager",
@@ -44,6 +43,32 @@ def _tree_digest(root: Path) -> str:
         if path.is_file() and not path.is_symlink():
             digest.update(path.read_bytes())
     return digest.hexdigest()
+
+
+def _copy_runtime_distribution(name: str, destination: Path) -> None:
+    """Copy one complete synced wheel distribution, including its native payload."""
+    distribution = importlib.metadata.distribution(name)
+    files = distribution.files
+    assert files is not None
+    copied: list[Path] = []
+    for package_path in files:
+        relative = Path(str(package_path))
+        if relative.is_absolute() or ".." in relative.parts:
+            continue
+        source = Path(distribution.locate_file(package_path))
+        if not source.is_file():
+            continue
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        copied.append(relative)
+
+    assert any(path.parts[0].startswith(f"{name}-") for path in copied)
+    assert any(
+        path.suffix.lower() in {".dylib", ".pyd", ".so"}
+        or any(part in {".dylibs", ".libs", f"{name}.libs"} for part in path.parts)
+        for path in copied
+    )
 
 
 def test_wheel_console_loads_all_runtime_modules_without_editable_source(tmp_path: Path) -> None:
@@ -90,13 +115,21 @@ def test_wheel_console_loads_all_runtime_modules_without_editable_source(tmp_pat
     assert create.returncode == 0, create.stderr
 
     python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    site_packages_result = _run(
+        [str(python), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        cwd=tmp_path,
+        env=clean_env,
+    )
+    assert site_packages_result.returncode == 0, site_packages_result.stderr
+    site_packages = Path(site_packages_result.stdout.strip())
+    _copy_runtime_distribution("pygame", site_packages)
+
     install = _run(
         [
             uv,
             "pip",
             "install",
             "--offline",
-            "--no-deps",
             "--python",
             str(python),
             str(wheel),
@@ -105,15 +138,6 @@ def test_wheel_console_loads_all_runtime_modules_without_editable_source(tmp_pat
         env=clean_env,
     )
     assert install.returncode == 0, install.stderr
-
-    site_packages_result = _run(
-        [str(python), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
-        cwd=tmp_path,
-        env=clean_env,
-    )
-    assert site_packages_result.returncode == 0, site_packages_result.stderr
-    site_packages = Path(site_packages_result.stdout.strip())
-    shutil.copytree(Path(pygame.__file__).parent, site_packages / "pygame")
     installed_digest = _tree_digest(site_packages)
 
     scripts = environment / ("Scripts" if os.name == "nt" else "bin")
