@@ -65,56 +65,66 @@ class SpriteManager:
         """
         一次性迁移老格式 → 新格式。
 
-        触发条件：`assets/Free Fish Icons/` 存在 且
-                  `assets/fish_sprites/Free Fish Icons/` 不存在。
+        触发条件：`assets/Free Fish Icons/` 存在，且由合法老格式文件
+                  推导出的目标类型尚未全部具有 canonical 帧。
         动作：
             FishA-1.png, FishA-2.png, ... → fish_sprites/Fish A/Fish-1.png, ...
             FishB-1.png ...              → fish_sprites/Fish B/Fish-1.png, ...
-        即：去掉前缀 `Fish`、把类型字母单独抽成目录名。
+        已存在的 canonical 文件从不覆盖；非 legacy 目标类型不影响判定。
         """
         if not os.path.isdir(self.OLD_DIR):
             return
-        if os.path.isdir(self.SPRITE_DIR):
-            for type_name in os.listdir(self.SPRITE_DIR):
-                type_dir = os.path.join(self.SPRITE_DIR, type_name)
-                if not os.path.isdir(type_dir):
-                    continue
-                if any(
-                    re.fullmatch(r"Fish-\d+\.png", file_name, re.IGNORECASE)
-                    for file_name in os.listdir(type_dir)
-                ):
-                    return
-        dest = os.path.join(self.SPRITE_DIR, "Free Fish Icons")
-        if os.path.isdir(dest):
-            return  # 已经迁移过，幂等
+
+        legacy_frames = []
+        for file_name in sorted(os.listdir(self.OLD_DIR)):
+            match = re.fullmatch(
+                r"Fish(?P<type>[A-Za-z0-9]+)-(?P<frame>\d+)\.png",
+                file_name,
+            )
+            if match is None:
+                continue
+            source = os.path.join(self.OLD_DIR, file_name)
+            if not os.path.isfile(source):
+                continue
+            target_type = f"Fish {match.group('type')}"
+            target_file = f"Fish-{match.group('frame')}.png"
+            legacy_frames.append((source, target_type, target_file))
+
+        if not legacy_frames:
+            return
+
+        target_types = {target_type for _, target_type, _ in legacy_frames}
+
+        def has_canonical_frame(target_type):
+            type_dir = os.path.join(self.SPRITE_DIR, target_type)
+            return os.path.isdir(type_dir) and any(
+                re.fullmatch(r"Fish-\d+\.png", file_name, re.IGNORECASE)
+                and os.path.isfile(os.path.join(type_dir, file_name))
+                for file_name in os.listdir(type_dir)
+            )
+
+        if all(has_canonical_frame(target_type) for target_type in target_types):
+            return
 
         os.makedirs(self.SPRITE_DIR, exist_ok=True)
-        os.makedirs(dest, exist_ok=True)
-
-        # 解析每个老文件名：FishA-1.png → type="A", frame=1
-        old_files = sorted(os.listdir(self.OLD_DIR))
-        for fname in old_files:
-            if not fname.endswith(".png") or not fname.startswith("Fish"):
-                continue
-            # 去掉 "Fish" 前缀得到 "A-1.png" 之类
-            stem = fname[4:]
-            if "-" not in stem:
-                continue
-            type_letter = stem[0]  # "A"
-            frame_num = stem[2:].split(".")[0]  # "1"
-            # 一个 type 一个目录，与新格式对齐
-            type_dir = os.path.join(self.SPRITE_DIR, f"Fish {type_letter}")
+        copied = False
+        for source, target_type, target_file in legacy_frames:
+            type_dir = os.path.join(self.SPRITE_DIR, target_type)
             os.makedirs(type_dir, exist_ok=True)
-            new_name = f"Fish-{frame_num}.png"
-            shutil.copy2(os.path.join(self.OLD_DIR, fname), os.path.join(type_dir, new_name))
+            destination = os.path.join(type_dir, target_file)
+            if os.path.lexists(destination):
+                continue
+            shutil.copy2(source, destination)
+            copied = True
 
-        logger.info(
-            "Migrated legacy sprite assets",
-            extra={
-                "event": "sprite_migration_completed",
-                "sprite_root": os.path.basename(os.path.normpath(self.SPRITE_DIR)),
-            },
-        )
+        if copied:
+            logger.info(
+                "Migrated legacy sprite assets",
+                extra={
+                    "event": "sprite_migration_completed",
+                    "sprite_root": os.path.basename(os.path.normpath(self.SPRITE_DIR)),
+                },
+            )
 
     def _scan_sprites_dir(self):
         """

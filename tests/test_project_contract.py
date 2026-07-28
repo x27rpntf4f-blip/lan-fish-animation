@@ -9,17 +9,21 @@ def test_project_declares_supported_python_and_dependencies() -> None:
     assert any(item.startswith("pygame>=2.5") for item in data["project"]["dependencies"])
 
 
-def test_repository_does_not_track_python_bytecode() -> None:
+def test_repository_does_not_track_python_bytecode(tmp_path: Path, monkeypatch) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    monkeypatch.chdir(tmp_path)
     result = subprocess.run(
-        ["git", "ls-files"],
+        ["git", "ls-files", "-z"],
         check=True,
         capture_output=True,
+        cwd=repository_root,
         text=True,
     )
 
     tracked_bytecode = [
         path
-        for path in result.stdout.splitlines()
+        for path in result.stdout.split("\0")
+        if path
         if "__pycache__" in Path(path).parts or path.endswith(".pyc")
     ]
 

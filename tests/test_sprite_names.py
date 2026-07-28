@@ -475,6 +475,79 @@ def test_legacy_migration_populates_canonical_tree_when_it_has_no_frames(tmp_pat
     manager._migrate_if_needed()
 
     assert (sprite_root / "Fish A" / "Fish-1.png").read_bytes() == b"legacy-frame"
+    assert not (sprite_root / "Free Fish Icons").exists()
+
+
+def test_legacy_migration_does_not_treat_custom_only_tree_as_complete(tmp_path: Path) -> None:
+    old_root = tmp_path / "Free Fish Icons"
+    sprite_root = tmp_path / "fish_sprites"
+    custom_frame = sprite_root / "Purple" / "Fish-1.png"
+    old_root.mkdir()
+    custom_frame.parent.mkdir(parents=True)
+    (old_root / "FishA-1.png").write_bytes(b"legacy-a")
+    (old_root / "FishB-1.png").write_bytes(b"legacy-b")
+    custom_frame.write_bytes(b"custom")
+    manager = SpriteManager.__new__(SpriteManager)
+    manager.OLD_DIR = str(old_root)
+    manager.SPRITE_DIR = str(sprite_root)
+
+    manager._migrate_if_needed()
+
+    assert custom_frame.read_bytes() == b"custom"
+    assert (sprite_root / "Fish A" / "Fish-1.png").read_bytes() == b"legacy-a"
+    assert (sprite_root / "Fish B" / "Fish-1.png").read_bytes() == b"legacy-b"
+
+
+def test_legacy_migration_fills_partial_targets_without_overwrite_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    old_root = tmp_path / "Free Fish Icons"
+    sprite_root = tmp_path / "fish_sprites"
+    existing_frame = sprite_root / "Fish A" / "Fish-1.png"
+    old_root.mkdir()
+    existing_frame.parent.mkdir(parents=True)
+    (old_root / "FishA-1.png").write_bytes(b"legacy-a1")
+    (old_root / "FishA-2.png").write_bytes(b"legacy-a2")
+    (old_root / "FishB-1.png").write_bytes(b"legacy-b1")
+    existing_frame.write_bytes(b"canonical-a1")
+    manager = SpriteManager.__new__(SpriteManager)
+    manager.OLD_DIR = str(old_root)
+    manager.SPRITE_DIR = str(sprite_root)
+
+    manager._migrate_if_needed()
+
+    assert existing_frame.read_bytes() == b"canonical-a1"
+    assert (sprite_root / "Fish A" / "Fish-2.png").read_bytes() == b"legacy-a2"
+    assert (sprite_root / "Fish B" / "Fish-1.png").read_bytes() == b"legacy-b1"
+    inventory_after_first_call = {
+        path.relative_to(sprite_root): path.read_bytes()
+        for path in sprite_root.rglob("*")
+        if path.is_file()
+    }
+
+    manager._migrate_if_needed()
+
+    inventory_after_second_call = {
+        path.relative_to(sprite_root): path.read_bytes()
+        for path in sprite_root.rglob("*")
+        if path.is_file()
+    }
+    assert inventory_after_second_call == inventory_after_first_call
+
+
+def test_legacy_migration_does_not_trust_empty_sentinel(tmp_path: Path) -> None:
+    old_root = tmp_path / "Free Fish Icons"
+    sprite_root = tmp_path / "fish_sprites"
+    old_root.mkdir()
+    (sprite_root / "Free Fish Icons").mkdir(parents=True)
+    (old_root / "FishA-1.png").write_bytes(b"legacy-a")
+    manager = SpriteManager.__new__(SpriteManager)
+    manager.OLD_DIR = str(old_root)
+    manager.SPRITE_DIR = str(sprite_root)
+
+    manager._migrate_if_needed()
+
+    assert (sprite_root / "Fish A" / "Fish-1.png").read_bytes() == b"legacy-a"
 
 
 def test_local_import_replaces_frame_symlink_without_overwriting_target(tmp_path: Path) -> None:
