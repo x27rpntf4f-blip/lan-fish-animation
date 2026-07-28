@@ -71,9 +71,11 @@ uv run python -m compileall -q src
 当前覆盖率命令如实统计整个 `src/`，包括暂未充分单测的 pygame/legacy 展示模块；项目尚未设定 `fail-under` 阈值。CI 使用相同的 Ruff、ty、pytest coverage 和 headless 冒烟命令。
 
 截至 2026-07-28，本地最终验证的代码快照为
-`65e0f620fd97bdd5caff150baff50bee1379ad80`：207 项测试全部通过，whole-`src`
-覆盖率为 62%（2,695 statements，本次实测 1,018 missed）。远程 3 OS × 3 Python
-CI 和真实三台物理机联调仍待验收。
+`1843dff986340aaad76d91753e433535e1cc50d6`：208 项测试被收集，207 项通过、
+1 项按平台预期跳过，whole-`src` 覆盖率为 62%（2,695 statements，本次
+实测 1,018 missed）。远程 Ubuntu/macOS/Windows × Python 3.11/3.12/3.13
+矩阵已在 push run `30362449459` 和 PR run `30362452977` 全部通过；真实三台
+物理机联调仍待验收。
 
 ## 三台局域网设备联调
 
@@ -90,7 +92,7 @@ CI 和真实三台物理机联调仍待验收。
 - V1 精灵包没有完整的多帧 manifest；M1 只能保证重试到至少一帧完整保存，无法检测后续缺帧。
 - V1 单帧最多为 103,040 字节（224 块 × 每块 460 字节）；导入归一化后超限的 PNG 会被明确拒绝，不会落盘或进入发送循环。
 - 网络广告只包含至少有一帧 regular file 且不超过上限的精灵类型；混合目录会保留类型并仅发送合法帧，超限-only 目录不会诱发对端永久重试。
-- CI 矩阵声明 Ubuntu、macOS、Windows 上的 Python 3.11–3.13 组合；这些组合只有在 GitHub Actions 实际运行成功后才可视为远程已验证。真实三台物理机联调仍需单独验收。
+- CI 矩阵已在 Ubuntu、macOS、Windows 上的 Python 3.11–3.13 九个组合全部通过；这不替代真实三台物理机的防火墙、广播和跨屏联调验收。
 
 ## Roadmap
 

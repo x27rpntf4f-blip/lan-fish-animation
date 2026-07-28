@@ -8,7 +8,8 @@
 - Final-hardening base: `d4c92f4f95f1811740af0c442e94c3dfee002153`.
 - Original project base: `603f7d31c795bac58740765b041c6bacc26f8659` (`main`).
 - This release record is a documentation-only descendant of the code commit.
-- No Git tag was created. Remote CI and real three-device evidence remain pending.
+- No Git tag was created. The remote 3 OS x 3 Python matrix is verified; real
+  three-device evidence remains pending.
 
 ## Local environment
 
@@ -74,8 +75,21 @@ distribution, including native payload and dist-info, before `uv` performs the
 offline fishmesh wheel install without `--no-deps`. Git paths stay as bytes.
 The unlink-replacement attack is POSIX-only, while Windows has an actual
 mandatory-lock test and the platform-independent native-guard rejection tests
-remain intact. These local results do not claim the 3 OS x 3 Python matrix is
-passing; a fresh remote run must establish that separately.
+remain intact. Subsequent remote runs established the matrix result recorded
+below.
+
+## Remote matrix verification
+
+On 2026-07-28, both GitHub Actions workflows completed all nine matrix jobs:
+
+- Push run `30362449459`: 9/9 passed.
+- Pull-request run `30362452977`: 9/9 passed.
+
+Each run covered Ubuntu, macOS, and Windows with Python 3.11, 3.12, and 3.13.
+Together they remotely verify code snapshot
+`1843dff986340aaad76d91753e433535e1cc50d6` after the initial portability
+failures and their focused fix. This release-note update was created after
+those runs and is not itself claimed as CI-verified.
 
 ## Quality gate results
 
@@ -169,9 +183,6 @@ clean at the code commit.
   order dependent and topology remains one-dimensional.
 - Whole-`src` coverage is measured but has no `fail-under` threshold. Pygame
   presentation modules remain the largest uncovered area.
-- The GitHub Actions 3 OS x 3 Python matrix is declared but still needs a
-  successful remote run. This local record does not claim native Linux or
-  Windows execution.
 - A real three-device LAN demonstration, including firewall and broadcast
   behavior, remains pending.
 
