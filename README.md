@@ -70,6 +70,11 @@ uv run python -m compileall -q src
 
 当前覆盖率命令如实统计整个 `src/`，包括暂未充分单测的 pygame/legacy 展示模块；项目尚未设定 `fail-under` 阈值。CI 使用相同的 Ruff、ty、pytest coverage 和 headless 冒烟命令。
 
+截至 2026-07-28，本地最终验证的代码快照为
+`34fd60e3135c8904f71595188c27f2fdeb25e867`：205 项测试全部通过，whole-`src`
+覆盖率为 61%（2,685 statements，本次实测 1,034 missed）。远程 3 OS × 3 Python
+CI 和真实三台物理机联调仍待验收。
+
 ## 三台局域网设备联调
 
 1. 将三台设备连入同一 IPv4 子网，关闭 AP/client isolation；各机的工程版本、`config.ini` 和需要的 `assets/` 应保持一致。
@@ -83,6 +88,7 @@ uv run python -m compileall -q src
 - 广播发现通常不穿越路由器、VLAN 或 NAT，尚无中继/穿透机制。
 - 主机 ID 会随拓扑重建而变化；M1 仍使用一维左右相邻关系。
 - V1 精灵包没有完整的多帧 manifest；M1 只能保证重试到至少一帧完整保存，无法检测后续缺帧。
+- V1 单帧最多为 103,040 字节（224 块 × 每块 460 字节）；导入归一化后超限的 PNG 会被明确拒绝，不会落盘或进入发送循环。
 - CI 矩阵声明 Ubuntu、macOS、Windows 上的 Python 3.11–3.13 组合；这些组合只有在 GitHub Actions 实际运行成功后才可视为远程已验证。真实三台物理机联调仍需单独验收。
 
 ## Roadmap
