@@ -233,7 +233,10 @@ def configure_logging(level: str = "INFO", json_output: bool = False) -> None:
 
     if handlers:
         handler = handlers[0]
-        handler.setStream(sys.stderr)
+        try:
+            handler.setStream(sys.stderr)
+        except (OSError, ValueError):
+            handler = _FishMeshHandler(sys.stderr)
     else:
         handler = _FishMeshHandler(sys.stderr)
 
@@ -248,5 +251,6 @@ def configure_logging(level: str = "INFO", json_output: bool = False) -> None:
         project_logger.setLevel(numeric_level)
         project_logger.propagate = False
 
-    for duplicate in handlers[1:]:
-        duplicate.close()
+    for duplicate in handlers:
+        if duplicate is not handler:
+            duplicate.close()

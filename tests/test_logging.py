@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
+import tempfile
 from pathlib import Path
 
 import fishmesh.logging as mesh_logging
@@ -21,7 +23,7 @@ def _remove_configured_handlers(original_handlers: list[logging.Handler]) -> Non
             root.removeHandler(handler)
             handler.close()
     configured_handlers = set()
-    for name in ("fishmesh", "fish_demo", "network", "sprite_manager", "sprite_sync"):
+    for name in mesh_logging._PROJECT_LOGGER_NAMES:
         logger = logging.getLogger(name)
         for handler in logger.handlers[:]:
             if handler.__class__.__name__ == "_FishMeshHandler":
@@ -91,6 +93,24 @@ def test_repeated_configuration_emits_each_text_event_once(capsys) -> None:
         lines = [line for line in capsys.readouterr().err.splitlines() if "frame_ready" in line]
         assert len(lines) == 1
         assert "sprite_name=Koi" in lines[0]
+    finally:
+        _remove_configured_handlers(original_handlers)
+        root.setLevel(original_level)
+
+
+def test_reconfiguration_recovers_when_previous_stream_is_closed(monkeypatch) -> None:
+    root = logging.getLogger()
+    original_handlers = root.handlers[:]
+    original_level = root.level
+    current_stderr = sys.stderr
+    temporary_stderr = tempfile.TemporaryFile(mode="w+")
+    try:
+        monkeypatch.setattr(sys, "stderr", temporary_stderr)
+        configure_logging("INFO")
+        temporary_stderr.close()
+        monkeypatch.setattr(sys, "stderr", current_stderr)
+
+        configure_logging("WARNING")
     finally:
         _remove_configured_handlers(original_handlers)
         root.setLevel(original_level)
